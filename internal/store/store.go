@@ -457,6 +457,25 @@ func (s *Store) ImportTrustedCert(subject, issuer, serial, ski, aki string, subj
 	return n > 0, err
 }
 
+// WithdrawBundleRoots untrusts roots imported from source whose SHA-256 is not
+// in keep and detaches them from source, so a root that returns to the bundle
+// is trusted again; reports how many were withdrawn.
+func (s *Store) WithdrawBundleRoots(source string, keep []string) (int64, error) {
+	query := "UPDATE certs SET trusted = 0, source_url = ? WHERE source_url = ? AND is_self_signed = 1"
+	args := []any{source + ":removed", source}
+	if len(keep) > 0 {
+		query += " AND sha256 NOT IN (?" + strings.Repeat(",?", len(keep)-1) + ")"
+		for _, h := range keep {
+			args = append(args, h)
+		}
+	}
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // Candidate is a stored certificate that may have issued another.
 type Candidate struct {
 	DER  []byte
