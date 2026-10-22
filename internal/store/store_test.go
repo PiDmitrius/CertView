@@ -100,6 +100,42 @@ func TestImportTrustedCertRespectsUntrust(t *testing.T) {
 	}
 }
 
+func TestWithdrawBundleRoots(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "certview.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	imp := func(der string) bool {
+		added, err := s.ImportTrustedCert("CN="+der, "CN="+der, der, "", "", nil, []byte(der), true, true, "mozilla")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return added
+	}
+	trusted := func(der string) bool {
+		ok, _ := s.IsCertTrusted(SHA256Hex([]byte(der)))
+		return ok
+	}
+	imp("kept")
+	imp("dropped")
+	if _, err := s.ImportTrustedCert("CN=ru", "CN=ru", "ru", "", "", nil, []byte("ru"), true, true, "ru-gov"); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.WithdrawBundleRoots("mozilla", []string{SHA256Hex([]byte("kept"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || !trusted("kept") || trusted("dropped") || !trusted("ru") {
+		t.Fatalf("withdrew %d; kept=%v dropped=%v ru=%v", n, trusted("kept"), trusted("dropped"), trusted("ru"))
+	}
+	if !imp("dropped") || !trusted("dropped") {
+		t.Fatal("root returning to the bundle not trusted again")
+	}
+}
+
 func TestLegacySerialUniqueMigrates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "certview.db")
 	legacy, err := sql.Open("sqlite3", path)
