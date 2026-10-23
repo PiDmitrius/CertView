@@ -605,8 +605,10 @@ func (ctx *Context) Verify(leafDER []byte, roots, intermediates [][]byte) (*Veri
 
 	result := &VerifyResult{RevocationStatus: "skipped"}
 
-	// Chain validity check (CRL flags off — caller does revocation manually)
-	C.mp_store_set_crl_check(store, 0)
+	// The caller checks revocation; a self-signed anchor's own signature is checked.
+	if rc := C.mp_store_set_flags(store, C.MP_VERIFY_CHECK_SS_SIG); rc != C.MP_OK {
+		return nil, rcError("mp_store_set_flags", rc)
+	}
 	var chain1 C.MP_CHAIN
 	rc = C.mp_verify(store, cert, &chain1)
 	if rc != C.MP_OK {

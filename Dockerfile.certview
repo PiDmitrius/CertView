@@ -11,6 +11,7 @@ FROM golang:1.24-bookworm AS go-build
 
 COPY --from=gost-openssl /opt/openssl/include/ /opt/openssl/include/
 COPY --from=gost-openssl /opt/openssl/lib/libcrypto.so.3 /opt/openssl/lib/
+COPY --from=gost-openssl /opt/openssl/lib/engines-3/gost.so /opt/openssl/lib/engines-3/
 RUN ln -s libcrypto.so.3 /opt/openssl/lib/libcrypto.so
 COPY --from=c-build /src/build/out/linux-amd64/libminipki.a /opt/lib/
 COPY --from=c-build /src/include/minipki.h /opt/include/
@@ -19,11 +20,12 @@ ENV CGO_ENABLED=1
 ENV CGO_CFLAGS="-I/opt/include -I/opt/openssl/include"
 ENV CGO_LDFLAGS="/opt/lib/libminipki.a -L/opt/openssl/lib -lcrypto -lpthread -ldl"
 ENV LD_LIBRARY_PATH=/opt/openssl/lib
+ENV MINIPKI_GOST_ENGINE=/opt/openssl/lib/engines-3/gost.so
 
 WORKDIR /app
 COPY . .
 RUN go mod tidy \
-    && go test ./cmd/certview ./internal/dnshost ./internal/store \
+    && go test ./cmd/certview ./internal/dnshost ./internal/store ./internal/trustbundle \
     && go build -o /certview ./cmd/certview
 
 # Stage 3: Runtime with shared OpenSSL + GOST engine
