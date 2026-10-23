@@ -653,9 +653,15 @@ async function loadLink(certs) {
   }
 }
 
-// The hash of the root page: a link's certificates or a stored thumbprint
-function loadHash() {
+// Loads what the address names: a site, with the thumbprint of the leaf
+// whose tab to show; else a link's certificates or a stored thumbprint.
+function route() {
+  const path = window.location.pathname;
   const hash = window.location.hash;
+  if (pathLooksLikeHost(path)) {
+    loadSiteByPath(path.slice(1).replace(/\/$/, ''), hash.slice(1) || null);
+    return;
+  }
   const certs = linkCerts(hash);
   if (certs) loadLink(certs);
   else if (hash.length > 1) loadByThumbprint(hash.slice(1));
@@ -868,7 +874,7 @@ function derActions(obj, name, sourceURL) {
 
 window.addEventListener('hashchange', () => {
   if (window.__suppressHash) return;
-  loadHash();
+  route();
 });
 
 window.addEventListener('DOMContentLoaded', async () => {
@@ -880,15 +886,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   } catch (e) {}
 
-  const path = window.location.pathname;
-  if (pathLooksLikeHost(path)) {
-    const hp = path.slice(1).replace(/\/$/, '');
-    const wantThumb = window.location.hash.slice(1) || null;
-    loadSiteByPath(hp, wantThumb);
-    return;
-  }
-
-  loadHash();
+  route();
 });
 
 function render(data) {

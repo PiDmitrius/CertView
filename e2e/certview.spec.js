@@ -53,6 +53,7 @@ test.describe('certview site links', () => {
     for (const href of copied) {
       await page.goto(href);
       await expectReady(page);
+      expect(page.url()).toBe(href);
     }
   });
 
