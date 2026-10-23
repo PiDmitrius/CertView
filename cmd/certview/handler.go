@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -96,6 +97,7 @@ type ocspJSON struct {
 	URL         string `json:"url"`
 	Status      string `json:"status"`
 	Verified    bool   `json:"verified"`
+	VerifyMsg   string `json:"verify_msg,omitempty"`
 	ThisUpdate  string `json:"this_update,omitempty"`
 	NextUpdate  string `json:"next_update,omitempty"`
 	ProducedAt  string `json:"produced_at,omitempty"`
@@ -117,6 +119,7 @@ type crlJSON struct {
 	SignatureStatus string   `json:"signature_status,omitempty"` // "verified" | "bad" | "unchecked"
 	SignatureMsg    string   `json:"signature_msg,omitempty"`
 	HasIDP          bool     `json:"has_idp,omitempty"`
+	IsDelta         bool     `json:"is_delta,omitempty"`
 	derJSON
 	Errors []string `json:"errors,omitempty"`
 }
@@ -465,6 +468,8 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		via     string // "CRL" | "OCSP"
 	}
 	certRevocations := make([]revResult, len(chain))
+	// Why the revocation of a certificate is not determined
+	undetermined := make([][]string, len(chain))
 	issuerCRLs := make(map[int][]crlJSON)
 	issuerOCSPs := make(map[int][]ocspJSON)
 
@@ -550,11 +555,6 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			if sigWarn != "" {
 				resp.Warnings = append(resp.Warnings, sigWarn)
 			}
-			if crlInfo.HasIDP {
-				resp.Warnings = append(resp.Warnings,
-					fmt.Sprintf("CRL %q has issuingDistributionPoint — scope not analyzed, revocation decision may be incomplete",
-						crlInfo.Issuer))
-			}
 
 			// Only trust the revocation decision if signature verified AND CRL is fresh.
 			// Otherwise we still record the CRL (for UI display) but do not count it.
@@ -570,13 +570,21 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 				}
 			}
 
+			// A scoped or delta CRL shows a certificate revoked, not unrevoked.
 			if authoritative && !crlChecked {
-				status := "not_revoked"
-				if revoked {
-					status = "revoked"
+				switch {
+				case revoked:
+					certRevocations[i] = revResult{status: "revoked", revoked: true, via: "CRL"}
+					crlChecked = true
+				case crlInfo.Scoped():
+					if note := crlScopeNote(crlInfo); !slices.Contains(undetermined[i], note) {
+						undetermined[i] = append(undetermined[i], note)
+						resp.Warnings = append(resp.Warnings, entry.info.Subject+": "+note)
+					}
+				default:
+					certRevocations[i] = revResult{status: "not_revoked", via: "CRL"}
+					crlChecked = true
 				}
-				certRevocations[i] = revResult{status: status, revoked: revoked, via: "CRL"}
-				crlChecked = true
 			}
 
 			// Fetched CRLs are persisted when their issuer verifies to a trusted root.
@@ -620,6 +628,7 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 					CertRevoked:  revoked, Source: source,
 					SignatureStatus: sigStatus, SignatureMsg: sigMsg,
 					HasIDP:  crlInfo.HasIDP,
+					IsDelta: crlInfo.IsDelta,
 					derJSON: h.derRef(crl.DER),
 				})
 			}
@@ -670,28 +679,35 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			}
 		}
 
-		// OCSP fallback: if CRL didn't determine status and cert has OCSP URL
+		// OCSP fallback: if CRL didn't determine status and cert has OCSP URL.
+		// A response counts only when verified, which takes a valid signature
+		// by the issuer or its responder and a current status; only good
+		// shows the certificate unrevoked. Others are displayed, not counted.
 		if !crlChecked && len(entry.info.OCSPURLs) > 0 && issuerIdx >= 0 {
-			ocspRes, source, url := h.resolveOCSP(ctx, rl, i, entry.info, chain[issuerIdx].info)
+			ocspRes, source, url, failure := h.resolveOCSP(ctx, rl, i, entry.info, chain[issuerIdx].info)
+			if failure != "" {
+				undetermined[i] = append(undetermined[i], failure)
+				resp.Warnings = append(resp.Warnings, entry.info.Subject+": "+failure)
+			}
 			if ocspRes != nil {
-				ocspStatus := "not_revoked"
-				ocspRevoked := false
-				if ocspRes.Status == "revoked" {
-					ocspStatus = "revoked"
-					ocspRevoked = true
+				note := ""
+				switch {
+				case !ocspRes.Verified:
+					note = ocspUnverifiedNote(ocspRes, time.Now())
+				case ocspRes.Status == "revoked":
+					certRevocations[i] = revResult{status: "revoked", revoked: true, via: "OCSP"}
+				case ocspRes.Status == "good":
+					certRevocations[i] = revResult{status: "not_revoked", via: "OCSP"}
+				default:
+					note = "OCSP status is " + ocspRes.Status
 				}
-
-				// OCSP response is authoritative only if signature verified against
-				// issuer (or a delegated OCSP signer chained to issuer).
-				// Unverified responses are still displayed in UI but do not count.
-				if ocspRes.Verified {
-					certRevocations[i] = revResult{status: ocspStatus, revoked: ocspRevoked, via: "OCSP"}
+				if note != "" {
+					rl.f("ocsp[%d]: not counted: %s", i, note)
+					undetermined[i] = append(undetermined[i], note)
+					resp.Warnings = append(resp.Warnings, entry.info.Subject+": "+note)
+				} else {
 					crlChecked = true
 					fetchErrors = nil
-				} else {
-					rl.f("ocsp[%d]: signature NOT verified — response ignored as authoritative", i)
-					resp.Warnings = append(resp.Warnings,
-						"OCSP response for "+entry.info.Subject+" failed signature verification — not trusted")
 				}
 
 				oj := ocspJSON{
@@ -702,6 +718,9 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 					CertSerial:  entry.info.Serial,
 					Source:      source,
 					derJSON:     h.derRef(ocspRes.DER),
+				}
+				if !ocspRes.Verified {
+					oj.VerifyMsg = note
 				}
 				if !ocspRes.ThisUpdate.IsZero() {
 					oj.ThisUpdate = ocspRes.ThisUpdate.Format(time.RFC3339)
@@ -762,7 +781,11 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 				anyRevoked = true
 			}
 			if certRevocations[i].status == "" {
-				notChecked = append(notChecked, entry.info.Subject)
+				name := entry.info.Subject
+				if len(undetermined[i]) > 0 {
+					name += " (" + strings.Join(undetermined[i], ", ") + ")"
+				}
+				notChecked = append(notChecked, name)
 			}
 		}
 		switch {
@@ -834,6 +857,7 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 		NextUpdate:   nextFmt,
 		RevokedCount: crlInfo.RevokedCount,
 		HasIDP:       crlInfo.HasIDP,
+		IsDelta:      crlInfo.IsDelta,
 		Source:       "upload",
 		derJSON:      h.derRef(crl.DER),
 	}
@@ -846,9 +870,8 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 	} else if !crlInfo.NextUpdate.IsZero() && now.After(crlInfo.NextUpdate) {
 		resp.Warnings = append(resp.Warnings, "CRL expired at "+nextFmt)
 	}
-	if crlInfo.HasIDP {
-		resp.Warnings = append(resp.Warnings,
-			"CRL has issuingDistributionPoint — scope not analyzed")
+	if crlInfo.Scoped() {
+		resp.Warnings = append(resp.Warnings, crlScopeNote(crlInfo)+": a certificate missing from it is not shown unrevoked")
 	}
 
 	// Find the CA cert that issued this CRL and verify signature against it.
@@ -1315,7 +1338,9 @@ func (h *handler) toggleTrust(w http.ResponseWriter, r *http.Request, trusted bo
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true, "trusted": trusted})
 }
 
-func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.CertInfo, issuer *pki.CertInfo) (*pki.OCSPResult, string, string) {
+// resolveOCSP returns the OCSP response for cert, cached or fetched, with its
+// source and URL; without one, why the responders gave none usable.
+func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.CertInfo, issuer *pki.CertInfo) (*pki.OCSPResult, string, string, string) {
 	s1 := sha1.Sum(cert.DER)
 	thumb := strings.ToUpper(hex.EncodeToString(s1[:]))
 
@@ -1324,7 +1349,7 @@ func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.C
 		rl.f("  ocsp[%d]: cache HIT for thumbprint=%s", i, thumb[:16])
 		res, err := h.ctx.ParseOCSPResponse(cert.DER, issuer.DER, der)
 		if err == nil {
-			return res, "cache", ""
+			return res, "cache", "", ""
 		}
 		rl.f("  ocsp[%d]: cache hit but parse failed: %v", i, err)
 	}
@@ -1333,9 +1358,10 @@ func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.C
 	reqBody, err := h.ctx.BuildOCSPRequest(cert.DER, issuer.DER)
 	if err != nil {
 		rl.f("  ocsp[%d]: build request failed: %v", i, err)
-		return nil, "", ""
+		return nil, "", "", ""
 	}
 
+	failure := ""
 	for _, url := range usableURLs(cert.OCSPURLs, maxOCSPURLs) {
 		rl.f("  ocsp[%d]: POST %s (%d bytes)", i, url, len(reqBody))
 		respBody, err := h.postOCSP(ctx, url, reqBody)
@@ -1348,6 +1374,7 @@ func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.C
 		res, err := h.ctx.ParseOCSPResponse(cert.DER, issuer.DER, respBody)
 		if err != nil {
 			rl.f("  ocsp[%d]: parse failed: %v", i, err)
+			failure = "OCSP response from " + url + " has no status for the certificate or is malformed"
 			continue
 		}
 		rl.f("  ocsp[%d]: status=%s verified=%v this=%s next=%s",
@@ -1361,9 +1388,34 @@ func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.C
 				rl.f("  ocsp[%d]: store save: %v", i, err)
 			}
 		}
-		return res, "fetched", url
+		return res, "fetched", url, ""
 	}
-	return nil, "", ""
+	return nil, "", "", failure
+}
+
+// ocspSkew is the clock skew MiniPKI allows an OCSP status.
+const ocspSkew = 5 * time.Minute
+
+// ocspUnverifiedNote says why a response did not verify: a status that is not
+// current, else its signature.
+func ocspUnverifiedNote(res *pki.OCSPResult, now time.Time) string {
+	switch {
+	case !res.ThisUpdate.IsZero() && now.Add(ocspSkew).Before(res.ThisUpdate):
+		return "OCSP response thisUpdate " + res.ThisUpdate.Format(time.RFC3339) + " is in the future"
+	case !res.NextUpdate.IsZero() && now.Add(-ocspSkew).After(res.NextUpdate):
+		return "OCSP response expired at " + res.NextUpdate.Format(time.RFC3339)
+	default:
+		return "OCSP response signature not verified"
+	}
+}
+
+// crlScopeNote says why a certificate missing from a scoped or delta CRL is
+// not shown unrevoked by it.
+func crlScopeNote(info *pki.CRLInfo) string {
+	if info.IsDelta {
+		return fmt.Sprintf("CRL %q is a delta CRL, listing only revocations since its base CRL", info.Issuer)
+	}
+	return fmt.Sprintf("CRL %q is scoped by issuingDistributionPoint and may not cover the certificate", info.Issuer)
 }
 
 func (h *handler) fetchWithInfo(ctx context.Context, kind fetchKind, url string) ([]byte, string, error) {

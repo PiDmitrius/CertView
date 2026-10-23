@@ -927,8 +927,10 @@ function render(data) {
         crlNode.className = 'crl-inline';
         const rev = crl.cert_revoked ? ' <span class="crl-revoked">REVOKED</span>' : '';
         const sigTag = crlSigTag(crl);
-        const scopeTag = crl.has_idp
-          ? ' <span class="tag unchecked" title="issuingDistributionPoint present — scope not analyzed, revocation may be incomplete">scope partial</span>'
+        const scopeTag = crl.is_delta
+          ? ' <span class="tag unchecked" title="Delta CRL: lists only revocations since its base CRL, so a certificate missing from it is not shown unrevoked">delta</span>'
+          : crl.has_idp
+          ? ' <span class="tag unchecked" title="issuingDistributionPoint present: the CRL may not cover every certificate, so one missing from it is not shown unrevoked">scope partial</span>'
           : '';
         let fname = (crl.urls[0]||'crl').split('/').pop().replace(/[^a-zA-Z0-9_.-]/g,'_');
         if (!fname.endsWith('.crl')) fname += '.crl';
@@ -953,7 +955,7 @@ function render(data) {
         else statusTag = ' <span style="color:var(--yellow)">' + esc(cap(ocsp.status)) + '</span>';
         const verTag = ocsp.verified
           ? ''
-          : ' <span class="tag bad" title="OCSP response signature not verified against issuer — response was ignored for revocation decision">sig NOT verified</span>';
+          : ` <span class="tag bad" title="${esc(ocsp.verify_msg||'')} — response was not used for the revocation decision">NOT verified</span>`;
         const dates = ocsp.next_update
           ? `${esc(ocsp.this_update).substring(0,10)} — ${esc(ocsp.next_update).substring(0,10)}${fmtRemaining(ocsp.next_update)}`
           : `${esc(ocsp.this_update).substring(0,10)} (no nextUpdate)`;
@@ -1087,7 +1089,7 @@ function selectOCSP(cert, oi) {
   const el = document.getElementById('cert-details');
   const verBadge = ocsp.verified
     ? ''
-    : ' <span class="verify-badge error" title="OCSP response signature did not verify against issuer — response was NOT used for revocation decision">Signature NOT verified</span>';
+    : ` <span class="verify-badge error" title="Response was NOT used for the revocation decision">${esc(ocsp.verify_msg || 'NOT verified')}</span>`;
   let statusBadge = '';
   if (ocsp.status === 'good') statusBadge = '<span class="verify-badge ok">Good</span>';
   else if (ocsp.status === 'revoked') statusBadge = '<span class="verify-badge error">Revoked</span>';
@@ -1134,8 +1136,10 @@ function selectCRL(cert, crlIdx) {
   const akiRow = crl.aki
     ? `<tr><td>AKI</td><td>${esc(crl.aki)}</td></tr>`
     : '';
-  const scopeRow = crl.has_idp
-    ? `<tr><td>Scope</td><td><span style="color:var(--text2)">partial</span> · issuingDistributionPoint present, not analyzed (revocation may be incomplete)</td></tr>`
+  const scopeRow = crl.is_delta
+    ? `<tr><td>Scope</td><td><span style="color:var(--text2)">delta</span> · lists only revocations since its base CRL; a certificate missing from it is not shown unrevoked</td></tr>`
+    : crl.has_idp
+    ? `<tr><td>Scope</td><td><span style="color:var(--text2)">partial</span> · issuingDistributionPoint present; a certificate missing from it is not shown unrevoked</td></tr>`
     : '';
 
   el.innerHTML = `<table>

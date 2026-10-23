@@ -168,6 +168,13 @@ type CRLInfo struct {
 	NextUpdate    time.Time
 	RevokedCount  int
 	HasIDP        bool
+	IsDelta       bool
+}
+
+// Scoped reports whether the CRL may not cover every certificate of its
+// issuer, so a certificate missing from it is not shown unrevoked.
+func (i *CRLInfo) Scoped() bool {
+	return i.HasIDP || i.IsDelta
 }
 
 // ErrCRLBadSignature is returned by CRL.Verify when CRL signature does not
@@ -489,6 +496,10 @@ func (ctx *Context) ParseCRL(data []byte) (*CRL, error) {
 	var hasIDP C.int32_t
 	if C.mp_crl_has_idp(crl, &hasIDP) == C.MP_OK {
 		info.HasIDP = hasIDP == 1
+	}
+	var isDelta C.int32_t
+	if C.mp_crl_is_delta(crl, &isDelta) == C.MP_OK {
+		info.IsDelta = isDelta == 1
 	}
 
 	var der *C.uint8_t
