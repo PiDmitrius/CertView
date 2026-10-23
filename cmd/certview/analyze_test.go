@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -125,5 +126,41 @@ func TestRootWithBadSignatureFailsChain(t *testing.T) {
 	bad[len(bad)-1] ^= 1
 	if resp := analyzeWith(t, newTestHandler(t, fakeNet{}), leaf.cert.Raw, bad); resp.Verify.Status == "ok" {
 		t.Fatal("root with a bad signature verified")
+	}
+}
+
+// testChain issues a chain of n certificates, leaf first, ending at a root.
+func testChain(t *testing.T, n int) [][]byte {
+	t.Helper()
+	ca := testIssue(t, "Depth Root", nil, true, nil)
+	ders := [][]byte{ca.cert.Raw}
+	for i := 1; i < n-1; i++ {
+		ca = testIssue(t, fmt.Sprintf("Depth CA %d", i), ca, true, nil)
+		ders = append([][]byte{ca.cert.Raw}, ders...)
+	}
+	leaf := testIssue(t, "Depth Leaf", ca, false, nil)
+	return append([][]byte{leaf.cert.Raw}, ders...)
+}
+
+func TestDepthWarningOnlyWithoutRoot(t *testing.T) {
+	hasWarning := func(resp *analyzeResponse) bool {
+		for _, w := range resp.Warnings {
+			if w == "Chain depth limit reached" {
+				return true
+			}
+		}
+		return false
+	}
+
+	full := testChain(t, maxChainDepth)
+	resp := analyzeWith(t, newTestHandler(t, fakeNet{}), full[0], full[1:]...)
+	if len(resp.Chain) != maxChainDepth || hasWarning(resp) {
+		t.Fatalf("chain of %d ending at a root: %d certs, warnings %v", maxChainDepth, len(resp.Chain), resp.Warnings)
+	}
+
+	long := testChain(t, maxChainDepth+1)
+	resp = analyzeWith(t, newTestHandler(t, fakeNet{}), long[0], long[1:]...)
+	if len(resp.Chain) != maxChainDepth || !hasWarning(resp) {
+		t.Fatalf("chain of %d: %d certs, warnings %v", maxChainDepth+1, len(resp.Chain), resp.Warnings)
 	}
 }

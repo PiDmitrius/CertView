@@ -391,7 +391,7 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		logCert(rl, fmt.Sprintf("chain[%d]:", depth), info)
 		current = info
 	}
-	if len(chain) >= maxChainDepth {
+	if len(chain) >= maxChainDepth && !current.IsSelfSigned {
 		rl.f("chain: DEPTH LIMIT reached (%d)", maxChainDepth)
 		resp.Warnings = append(resp.Warnings, "Chain depth limit reached")
 	}
