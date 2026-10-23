@@ -130,3 +130,25 @@ func TestScopedCRLShowsRevokedNotUnrevoked(t *testing.T) {
 		})
 	}
 }
+
+func TestOCSPRevocationDateAndReason(t *testing.T) {
+	root := testIssue(t, "OCSP Root", nil, true, nil)
+	url := "http://ocsp.test/revoked"
+	leaf := testIssue(t, "Leaf revoked", root, false, func(c *x509.Certificate) { c.OCSPServer = []string{url} })
+	revokedAt := time.Now().Add(-2 * time.Hour).Truncate(time.Second).UTC()
+	tmpl := ocsp.Response{Status: ocsp.Revoked, SerialNumber: leaf.cert.SerialNumber,
+		ThisUpdate: time.Now().Add(-time.Hour), NextUpdate: time.Now().Add(time.Hour),
+		RevokedAt: revokedAt, RevocationReason: ocsp.KeyCompromise}
+
+	status, resp := revocationOf(t, fakeNet{url: ocspResponder(t, root, tmpl)}, root, leaf)
+	if status != "revoked" || resp.Verify.RevocationStatus != "revoked" {
+		t.Fatalf("revocation %q, overall %q", status, resp.Verify.RevocationStatus)
+	}
+	want := revokedAt.Format(time.RFC3339)
+	if r := resp.Chain[0].Revocation; r.RevokedAt != want || r.Reason != "keyCompromise" {
+		t.Fatalf("certificate revocation %+v, want %s keyCompromise", r, want)
+	}
+	if o := resp.Chain[1].IssuedOCSPs; len(o) != 1 || o[0].RevokedAt != want || o[0].Reason != "keyCompromise" {
+		t.Fatalf("OCSP response %+v", o)
+	}
+}

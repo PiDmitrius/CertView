@@ -101,6 +101,8 @@ type ocspJSON struct {
 	ThisUpdate  string `json:"this_update,omitempty"`
 	NextUpdate  string `json:"next_update,omitempty"`
 	ProducedAt  string `json:"produced_at,omitempty"`
+	RevokedAt   string `json:"revoked_at,omitempty"`
+	Reason      string `json:"revoke_reason,omitempty"`
 	CertSubject string `json:"cert_subject"`
 	CertSerial  string `json:"cert_serial"`
 	Source      string `json:"source,omitempty"`
@@ -125,8 +127,10 @@ type crlJSON struct {
 }
 
 type revJSON struct {
-	Status string `json:"status"`
-	Via    string `json:"via"`
+	Status    string `json:"status"`
+	Via       string `json:"via"`
+	RevokedAt string `json:"revoked_at,omitempty"`
+	Reason    string `json:"revoke_reason,omitempty"`
 }
 
 type verifyJSON struct {
@@ -463,9 +467,11 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 	}
 
 	type revResult struct {
-		status  string
-		revoked bool
-		via     string // "CRL" | "OCSP"
+		status    string
+		revoked   bool
+		via       string // "CRL" | "OCSP"
+		revokedAt string
+		reason    string
 	}
 	certRevocations := make([]revResult, len(chain))
 	// Why the revocation of a certificate is not determined
@@ -695,7 +701,8 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 				case !ocspRes.Verified:
 					note = ocspUnverifiedNote(ocspRes, time.Now())
 				case ocspRes.Status == "revoked":
-					certRevocations[i] = revResult{status: "revoked", revoked: true, via: "OCSP"}
+					certRevocations[i] = revResult{status: "revoked", revoked: true, via: "OCSP",
+						revokedAt: ocspRevokedAt(ocspRes), reason: revokeReasonName(ocspRes.RevokeReason)}
 				case ocspRes.Status == "good":
 					certRevocations[i] = revResult{status: "not_revoked", via: "OCSP"}
 				default:
@@ -730,6 +737,10 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 				}
 				if !ocspRes.ProducedAt.IsZero() {
 					oj.ProducedAt = ocspRes.ProducedAt.Format(time.RFC3339)
+				}
+				if ocspRes.Status == "revoked" {
+					oj.RevokedAt = ocspRevokedAt(ocspRes)
+					oj.Reason = revokeReasonName(ocspRes.RevokeReason)
 				}
 				issuerOCSPs[issuerIdx] = append(issuerOCSPs[issuerIdx], oj)
 			}
@@ -826,8 +837,10 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		cj := h.certToJSON(entry.info, entry.source)
 		if certRevocations[i].status != "" {
 			cj.Revocation = &revJSON{
-				Status: certRevocations[i].status,
-				Via:    certRevocations[i].via,
+				Status:    certRevocations[i].status,
+				Via:       certRevocations[i].via,
+				RevokedAt: certRevocations[i].revokedAt,
+				Reason:    certRevocations[i].reason,
 			}
 		}
 		cj.IssuedCRLs = issuerCRLs[i]
@@ -1407,6 +1420,29 @@ func ocspUnverifiedNote(res *pki.OCSPResult, now time.Time) string {
 	default:
 		return "OCSP response signature not verified"
 	}
+}
+
+func ocspRevokedAt(res *pki.OCSPResult) string {
+	if res.RevokedAt.IsZero() {
+		return ""
+	}
+	return res.RevokedAt.Format(time.RFC3339)
+}
+
+// revokeReasonName names a CRLReason (RFC 5280 §5.3.1); none is negative.
+func revokeReasonName(reason int) string {
+	names := map[int]string{
+		0: "unspecified", 1: "keyCompromise", 2: "cACompromise", 3: "affiliationChanged",
+		4: "superseded", 5: "cessationOfOperation", 6: "certificateHold",
+		8: "removeFromCRL", 9: "privilegeWithdrawn", 10: "aACompromise",
+	}
+	if reason < 0 {
+		return ""
+	}
+	if name, ok := names[reason]; ok {
+		return name
+	}
+	return fmt.Sprintf("reason %d", reason)
 }
 
 // crlScopeNote says why a certificate missing from a scoped or delta CRL is

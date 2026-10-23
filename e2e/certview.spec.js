@@ -67,3 +67,52 @@ test.describe('certview site links', () => {
     await expect(page.locator('#results')).not.toHaveClass(/active/);
   });
 });
+
+test.describe('revocation details', () => {
+  const revokedAt = '2026-10-01T12:00:00Z';
+  const cert = (cn, extra) => ({
+    subject: 'CN = ' + cn, issuer: 'CN = Test Root', serial: '0A', path_len: -1,
+    not_before: '2026-01-01T00:00:00Z', not_after: '2027-01-01T00:00:00Z',
+    is_ca: false, is_self_signed: false, is_cross_signed: false, trusted: false,
+    thumbprint_sha1: 'AA', thumbprint_sha256: 'BB', stored: false, ...extra,
+  });
+  const analysis = {
+    chain: [
+      cert('Revoked Leaf', {
+        ocsp_urls: ['http://ocsp.test/'],
+        revocation: { status: 'revoked', via: 'OCSP', revoked_at: revokedAt, revoke_reason: 'keyCompromise' },
+      }),
+      cert('Test Root', {
+        is_ca: true, is_self_signed: true, serial: '01',
+        issued_ocsps: [{
+          url: 'http://ocsp.test/', status: 'revoked', verified: true,
+          this_update: '2026-10-20T00:00:00Z', next_update: '2026-10-30T00:00:00Z',
+          revoked_at: revokedAt, revoke_reason: 'keyCompromise',
+          cert_subject: 'CN = Revoked Leaf', cert_serial: '0A', source: 'fetched',
+        }],
+      }),
+    ],
+    verify: { status: 'error', message: 'Certificate is revoked', trusted: false, revocation_status: 'revoked' },
+    is_admin: false,
+  };
+
+  test('shows OCSP revocation date and reason', async ({ page }) => {
+    await page.route('**/api/analyze', route => route.fulfill({ json: analysis }));
+    await page.goto(baseURL + '/');
+    await page.fill('#pem-input', '-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----');
+    await page.click('#pem-btn');
+    await expectReady(page);
+
+    const details = page.locator('#cert-details');
+    await expect(details).toContainText(revokedAt);
+    await expect(details).toContainText('keyCompromise');
+
+    const ocspNode = page.locator('#chain-tree .crl-inline', { hasText: 'OCSP' });
+    await expect(ocspNode).toContainText(revokedAt);
+    await ocspNode.click();
+    await expect(details).toContainText('Revoked At');
+    await expect(details).toContainText(revokedAt);
+    await expect(details).toContainText('Revocation Reason');
+    await expect(details).toContainText('keyCompromise');
+  });
+});

@@ -950,7 +950,7 @@ function render(data) {
         ocspNode.className = 'crl-inline';
         const cap = s => s ? s[0].toUpperCase() + s.slice(1) : s;
         let statusTag = '';
-        if (ocsp.status === 'revoked') statusTag = ' <span class="crl-revoked">Revoked</span>';
+        if (ocsp.status === 'revoked') statusTag = ' <span class="crl-revoked">Revoked</span>' + revokedDetail(ocsp);
         else if (ocsp.status === 'good') statusTag = ''; // good — not noisy
         else statusTag = ' <span style="color:var(--yellow)">' + esc(cap(ocsp.status)) + '</span>';
         const verTag = ocsp.verified
@@ -1068,7 +1068,7 @@ function selectCert(e, chain, idx, mode, crlIdx) {
     <tr><td colspan="2" class="detail-label">Revocation</td></tr>
     <tr><td>${esc(cert.revocation.via)}</td><td>${
       cert.revocation.status === 'revoked'
-        ? '<span class="crl-revoked">REVOKED</span>'
+        ? '<span class="crl-revoked">REVOKED</span>' + revokedDetail(cert.revocation)
         : '<span style="color:var(--green)">Not revoked</span>'
     }</td></tr>
     ` : ''}
@@ -1082,6 +1082,11 @@ function selectCert(e, chain, idx, mode, crlIdx) {
       setTimeout(() => td.classList.remove('copied'), 1000);
     });
   });
+}
+
+// " · <date> · <reason>" of a revocation that carries them
+function revokedDetail(r) {
+  return [r.revoked_at, r.revoke_reason].filter(Boolean).map(v => ' · ' + esc(v)).join('');
 }
 
 function selectOCSP(cert, oi) {
@@ -1100,6 +1105,8 @@ function selectOCSP(cert, oi) {
     <tr><td>Status</td><td>${statusBadge} ${verBadge}</td></tr>
     <tr><td>For Cert</td><td>${fmtDN(ocsp.cert_subject)}</td></tr>
     <tr><td>Cert Serial</td><td>${esc(ocsp.cert_serial)}</td></tr>
+    ${ocsp.revoked_at ? `<tr><td>Revoked At</td><td>${esc(ocsp.revoked_at)}</td></tr>` : ''}
+    ${ocsp.revoke_reason ? `<tr><td>Revocation Reason</td><td>${esc(ocsp.revoke_reason)}</td></tr>` : ''}
 
     <tr><td colspan="2" class="detail-label">Validity</td></tr>
     ${ocsp.this_update ? `<tr><td>This Update</td><td>${esc(ocsp.this_update)}</td></tr>` : ''}
