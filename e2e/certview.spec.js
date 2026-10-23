@@ -68,6 +68,49 @@ test.describe('certview site links', () => {
   });
 });
 
+test.describe('certificate links', () => {
+  const b64url = b64 => b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  let chain;
+
+  test.beforeAll(async ({ request }) => {
+    const resp = await request.post(baseURL + '/api/site', { data: { url: siteHost } });
+    expect(resp.ok()).toBeTruthy();
+    const site = await resp.json();
+    chain = site.results.find(r => r.ok).analysis.chain.map(c => b64url(c.der_b64));
+    expect(chain.length).toBeGreaterThan(1);
+  });
+
+  test('opens the certificate of a link and keeps the link on reload', async ({ page }) => {
+    const link = baseURL + '/#cert=' + chain[0];
+    await page.goto(link);
+    await expectReady(page);
+    await expect(page.locator('#chain-tree > .chain-node').first()).toContainText('LEAF');
+    expect(page.url()).toBe(link);
+
+    await page.reload();
+    await expectReady(page);
+    expect(page.url()).toBe(link);
+  });
+
+  test('builds the whole chain from a link', async ({ page }) => {
+    const link = baseURL + '/#' + chain.map(c => 'cert=' + c).join('&');
+    await page.goto(link);
+    await expectReady(page);
+    await expect(page.locator('#chain-tree > .chain-node')).toHaveCount(chain.length);
+    expect(page.url()).toBe(link);
+  });
+
+  test('reports a bad link', async ({ page }) => {
+    for (const hash of ['#cert=not*base64', '#cert=' + chain[0] + '&cert=MAMCAQE']) {
+      await page.goto('about:blank');
+      await page.goto(baseURL + '/' + hash);
+      await waitIdle(page);
+      await expect(page.locator('#error-box')).toHaveClass(/active/);
+      await expect(page.locator('#error-box')).toContainText('Bad link');
+    }
+  });
+});
+
 test.describe('revocation details', () => {
   const revokedAt = '2026-10-01T12:00:00Z';
   const cert = (cn, extra) => ({

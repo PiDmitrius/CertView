@@ -107,7 +107,7 @@ func analyzeWith(t *testing.T, h *handler, leaf []byte, certs ...[]byte) *analyz
 		}
 		bag = append(bag, bagCert{info: info, source: "test"})
 	}
-	resp, err := h.analyzeData(context.Background(), reqLog{}, leaf, bag)
+	resp, err := h.analyzeData(context.Background(), reqLog{}, leaf, bag, false)
 	if err != nil {
 		t.Fatal(err)
 	}

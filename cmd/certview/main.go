@@ -183,6 +183,7 @@ func main() {
 
 	mount := func(mux *http.ServeMux, h *handler) {
 		mux.HandleFunc("POST /api/analyze", h.analyze)
+		mux.HandleFunc("POST /api/link", h.analyzeLink)
 		mux.HandleFunc("GET /api/cert/{thumbprint}", h.analyzeByThumbprint)
 		mux.HandleFunc("GET /api/der/{sha256}", h.derBySHA256)
 		mux.HandleFunc("POST /api/site", h.analyzeSite)

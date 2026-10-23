@@ -315,13 +315,14 @@ func (h *handler) doAnalyze(ctx context.Context, data []byte) (*analyzeResponse,
 		return nil, err
 	}
 	defer release()
-	return h.analyzeData(ctx, rl, data, nil)
+	return h.analyzeData(ctx, rl, data, nil, false)
 }
 
 // analyzeData runs one analysis within a context from guardAnalysis. bag
 // holds certificates this analysis may use as issuers beyond the trusted
-// pool, such as the chain a site presented.
-func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag []bagCert) (*analyzeResponse, error) {
+// pool, such as the chain a site presented. With link, data and bag come from
+// a link and none of them is stored.
+func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag []bagCert, link bool) (*analyzeResponse, error) {
 	start := time.Now()
 	resp := &analyzeResponse{}
 
@@ -350,8 +351,16 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		return resp, nil
 	}
 
-	// Save all parsed certs — needed for shareable links via thumbprint
-	if err := h.store.SaveCert(
+	// Uploads are stored for shareable links via thumbprint; a link is its own.
+	leafSource := "upload"
+	transient := map[string]bool{}
+	if link {
+		leafSource = sourceLink
+		transient[string(leaf.DER)] = true
+		for _, c := range bag {
+			transient[string(c.info.DER)] = true
+		}
+	} else if err := h.store.SaveCert(
 		leaf.Subject, leaf.Issuer, leaf.Serial,
 		leaf.SKI, leaf.AKI, leaf.SubjectNameDER,
 		leaf.DER, leaf.IsCA, leaf.IsSelfSigned, "",
@@ -364,7 +373,7 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		source string
 	}
 
-	chain := []chainEntry{{info: leaf, source: "upload"}}
+	chain := []chainEntry{{info: leaf, source: leafSource}}
 	aiaBag := bag
 	seen := map[string]bool{store.SHA256Hex(leaf.DER): true}
 
@@ -398,10 +407,12 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 
 	rl.f("chain: %d certs total", len(chain))
 	for _, entry := range chain[1:] {
-		h.archive(rl, entry.info, entry.source)
+		if !transient[string(entry.info.DER)] {
+			h.archive(rl, entry.info, entry.source)
+		}
 	}
 	for _, c := range aiaBag {
-		if c.source != "archive" {
+		if c.source != "archive" && !transient[string(c.info.DER)] {
 			h.archive(rl, c.info, c.source)
 		}
 	}
@@ -595,7 +606,7 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 
 			// Fetched CRLs are persisted when their issuer verifies to a trusted root.
 			if authoritative && source == "fetched" {
-				if _, ok := h.trustedPath(crlIssuer.DER, roots, intermediates); !ok {
+				if _, ok := h.trustedPath(crlIssuer.DER, roots, intermediates, transient); !ok {
 					rl.f("crl[%d]: not saved, issuer has no trusted anchor: %s", i, url)
 				} else if err := h.store.SaveCRL(crlInfo.Issuer, url, crl.DER, crlInfo.ThisUpdate, crlInfo.NextUpdate); err != nil {
 					rl.f("crl[%d]: store.SaveCRL: %v", i, err)
@@ -823,7 +834,7 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			resp.Verify.RevocationStatus, resp.Verify.RevocationMsg)
 
 		if vr.ChainStatus == "ok" {
-			if via, ok := h.trustedPath(leaf.DER, roots, intermediates); ok {
+			if via, ok := h.trustedPath(leaf.DER, roots, intermediates, transient); ok {
 				resp.Verify.Trusted = true
 				resp.Verify.TrustVia = via
 				rl.f("verify: trusted via %q", via)
@@ -977,8 +988,8 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 // trustedPath verifies der with only the trusted roots among roots as
 // anchors, so trust follows the path OpenSSL verified rather than the chain
 // certview resolved; it returns the anchor's subject. The CAs on a verified
-// path join the pool of candidate issuers.
-func (h *handler) trustedPath(der []byte, roots, intermediates [][]byte) (string, bool) {
+// path, except transient ones, join the pool of candidate issuers.
+func (h *handler) trustedPath(der []byte, roots, intermediates [][]byte, transient map[string]bool) (string, bool) {
 	var anchors [][]byte
 	for _, r := range roots {
 		if t, _ := h.store.IsCertTrusted(store.SHA256Hex(r)); t {
@@ -993,7 +1004,7 @@ func (h *handler) trustedPath(der []byte, roots, intermediates [][]byte) (string
 		return "", false
 	}
 	for _, c := range vr.Chain {
-		if c.IsCA && len(c.DER) > 0 {
+		if c.IsCA && len(c.DER) > 0 && !transient[string(c.DER)] {
 			if err := h.store.SavePoolCert(c.Subject, c.Issuer, c.Serial, c.SKI, c.AKI,
 				c.SubjectNameDER, c.DER, true, c.IsSelfSigned, ""); err != nil {
 				log.Printf("store.SavePoolCert(%s): %v", c.Subject, err)
@@ -1051,7 +1062,7 @@ func (h *handler) chainsToTrust(cert *pki.CertInfo) bool {
 			}
 		}
 	}
-	_, ok := h.trustedPath(cert.DER, roots, intermediates)
+	_, ok := h.trustedPath(cert.DER, roots, intermediates, nil)
 	return ok
 }
 
@@ -1064,8 +1075,11 @@ func (h *handler) trusted(c *pki.CertInfo) bool {
 // chain, the analysis's own AIA responses or the archive's last-resort sample.
 type bagCert struct {
 	info   *pki.CertInfo
-	source string // "tls" | "fetched" | "archive"
+	source string // "tls" | "fetched" | "archive" | sourceLink
 }
+
+// sourceLink labels certificates that came in a link.
+const sourceLink = "link"
 
 func (h *handler) resolveIssuer(ctx context.Context, rl reqLog, cert *pki.CertInfo, resp *analyzeResponse, bag *[]bagCert) (*pki.CertInfo, string) {
 	// 1. Certificates this analysis already holds

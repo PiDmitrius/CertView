@@ -621,6 +621,46 @@ async function loadByThumbprint(tp) {
   }
 }
 
+// #cert=<base64url DER>[&cert=…]: the certificates of a link, leaf first
+function linkCerts(hash) {
+  if (!hash.startsWith('#cert=')) return null;
+  return new URLSearchParams(hash.slice(1)).getAll('cert');
+}
+
+async function loadLink(certs) {
+  window.__rerun = () => loadLink(certs);
+  loading.classList.add('active');
+  results.classList.remove('active');
+  clearError();
+  resetSiteState();
+  try {
+    const resp = await fetch('/api/link', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({certs}),
+    });
+    if (!resp.ok) {
+      const t = (await resp.text()).trim();
+      if (resp.status === 400) showError('Bad link', t.replace(/^Bad link: /, ''));
+      else showError('Load failed', t);
+      return;
+    }
+    render(await resp.json());
+  } catch (e) {
+    showError('Load failed', e.message);
+  } finally {
+    loading.classList.remove('active');
+  }
+}
+
+// The hash of the root page: a link's certificates or a stored thumbprint
+function loadHash() {
+  const hash = window.location.hash;
+  const certs = linkCerts(hash);
+  if (certs) loadLink(certs);
+  else if (hash.length > 1) loadByThumbprint(hash.slice(1));
+}
+
 async function fetchSite(url) {
   window.__rerun = () => fetchSite(url);
   loading.classList.add('active');
@@ -828,8 +868,7 @@ function derActions(obj, name, sourceURL) {
 
 window.addEventListener('hashchange', () => {
   if (window.__suppressHash) return;
-  const tp = window.location.hash.slice(1);
-  if (tp) loadByThumbprint(tp);
+  loadHash();
 });
 
 window.addEventListener('DOMContentLoaded', async () => {
@@ -849,8 +888,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
-  const tp = window.location.hash.slice(1);
-  if (tp) loadByThumbprint(tp);
+  loadHash();
 });
 
 function render(data) {
