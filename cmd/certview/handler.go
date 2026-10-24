@@ -1319,6 +1319,10 @@ func (h *handler) analyzeByThumbprint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	// HEAD only reports that the certificate is stored
+	if r.Method == http.MethodHead {
+		return
+	}
 	h.respondAnalysis(w, r, der, func() {})
 }
 

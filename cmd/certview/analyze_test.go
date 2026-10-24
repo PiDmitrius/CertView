@@ -6,12 +6,15 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -162,5 +165,26 @@ func TestDepthWarningOnlyWithoutRoot(t *testing.T) {
 	resp = analyzeWith(t, newTestHandler(t, fakeNet{}), long[0], long[1:]...)
 	if len(resp.Chain) != maxChainDepth || !hasWarning(resp) {
 		t.Fatalf("chain of %d: %d certs, warnings %v", maxChainDepth+1, len(resp.Chain), resp.Warnings)
+	}
+}
+
+func TestCertHeadReportsStored(t *testing.T) {
+	h := newTestHandler(t, fakeNet{})
+	h.analysisCache = newRespCache[analyzeResponse](0)
+	cert := testIssue(t, "Stored", nil, true, nil)
+	analyzeWith(t, h, cert.cert.Raw)
+	head := func(tp string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodHead, "/api/cert/"+tp, nil)
+		req.SetPathValue("thumbprint", tp)
+		rec := httptest.NewRecorder()
+		h.analyzeByThumbprint(rec, req)
+		return rec
+	}
+	sum := sha1.Sum(cert.cert.Raw)
+	if rec := head(strings.ToUpper(hex.EncodeToString(sum[:]))); rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Fatalf("stored: HTTP %d, %d bytes", rec.Code, rec.Body.Len())
+	}
+	if rec := head(strings.Repeat("0", 40)); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing: HTTP %d", rec.Code)
 	}
 }

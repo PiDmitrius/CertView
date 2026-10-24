@@ -452,6 +452,16 @@ main {
 }
 
 #error-box.active { display: block; }
+
+#site-notice:not(:empty) {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  background: #fff8c5;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 #error-box .error-title { font-weight: 600; margin-bottom: 4px; }
 #error-box .error-message { color: var(--text); overflow-wrap: anywhere; }
 
@@ -482,6 +492,7 @@ main {
   <div id="results">
     <div class="section" id="verify-section">
       <div class="site-tabs" id="site-tabs" style="display:none"></div>
+      <div id="site-notice"></div>
       <h2>Verification</h2>
       <div id="verify-result"></div>
     </div>
@@ -531,6 +542,7 @@ function showError(title, message) {
 function resetSiteState() {
   siteData = null;
   siteTabs.style.display = 'none';
+  document.getElementById('site-notice').textContent = '';
 }
 
 // Heuristic: decide whether textarea content is a URL/host or PEM/binary.
@@ -721,18 +733,38 @@ async function loadSiteByPath(hostport, targetThumb) {
     }
     const data = await resp.json();
     siteData = data;
+    let missing = false;
     if (targetThumb) {
       const idx = data.results.findIndex(r =>
         r.ok && r.analysis && r.analysis.chain[0] &&
         r.analysis.chain[0].thumbprint_sha1 === targetThumb);
       if (idx >= 0) activeTabIdx = idx;
+      else missing = true;
     }
     renderSite(data);
+    if (missing) noteMissingThumb(hostport, targetThumb);
   } catch (e) {
     showError('Request failed', e.message);
   } finally {
     loading.classList.remove('active');
   }
+}
+
+// The certificate a site link names is not served by the site now: say so,
+// link it from the archive when stored, and keep only the site in the address.
+async function noteMissingThumb(hostport, tp) {
+  window.history.replaceState(null, '', '/' + hostport);
+  const short = tp.length > 16 ? tp.slice(0, 16) + '…' : tp;
+  const notice = document.getElementById('site-notice');
+  notice.textContent = `Certificate ${short} from the link is not served by the site now; showing the current one.`;
+  try {
+    const resp = await fetch('/api/cert/' + encodeURIComponent(tp), { method: 'HEAD' });
+    if (!resp.ok) return;
+    const a = document.createElement('a');
+    a.href = '/#' + tp;
+    a.textContent = 'Open it from the archive';
+    notice.append(' ', a);
+  } catch (e) {}
 }
 
 function renderSite(data) {

@@ -57,6 +57,28 @@ test.describe('certview site links', () => {
     }
   });
 
+  test('notes a site link whose certificate the site no longer serves', async ({ page }) => {
+    await page.goto(baseURL + '/' + siteHost);
+    await expectReady(page);
+    const chain = await page.evaluate(() => window.__lastData.chain);
+    const notice = page.locator('#site-notice');
+
+    await page.goto(baseURL + '/' + siteHost + '#' + '0'.repeat(40));
+    await expectReady(page);
+    await expect(notice).toContainText('not served by the site now');
+    await expect(notice.locator('a')).toHaveCount(0);
+    expect(page.url()).toBe(baseURL + '/' + siteHost);
+
+    const archived = chain[1].thumbprint_sha1;
+    await page.goto(baseURL + '/' + siteHost + '#' + archived);
+    await expectReady(page);
+    await expect(notice.locator('a')).toHaveAttribute('href', '/#' + archived);
+    await notice.locator('a').click();
+    await expectReady(page);
+    expect(page.url()).toBe(baseURL + '/#' + archived);
+    await expect(notice).toBeEmpty();
+  });
+
   test('shows in-page error without dialog for unresolved host', async ({ page }) => {
     await page.goto(baseURL + '/');
     await page.fill('#pem-input', unresolvedHost);
