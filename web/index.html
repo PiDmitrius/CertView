@@ -1014,7 +1014,7 @@ function render(data) {
         const scopeTag = crl.is_delta
           ? ' <span class="tag unchecked" title="Delta CRL: lists only revocations since its base CRL, so a certificate missing from it is not shown unrevoked">delta</span>'
           : crl.has_idp
-          ? ' <span class="tag unchecked" title="issuingDistributionPoint present: the CRL may not cover every certificate, so one missing from it is not shown unrevoked">scope partial</span>'
+          ? ' <span class="tag unchecked" title="issuingDistributionPoint present: the CRL covers only the certificates in its scope">scope partial</span>'
           : '';
         let fname = (crl.urls[0]||'crl').split('/').pop().replace(/[^a-zA-Z0-9_.-]/g,'_');
         if (!fname.endsWith('.crl')) fname += '.crl';
@@ -1230,7 +1230,7 @@ function selectCRL(cert, crlIdx) {
   const scopeRow = crl.is_delta
     ? `<tr><td>Scope</td><td><span style="color:var(--text2)">delta</span> · lists only revocations since its base CRL; a certificate missing from it is not shown unrevoked</td></tr>`
     : crl.has_idp
-    ? `<tr><td>Scope</td><td><span style="color:var(--text2)">partial</span> · issuingDistributionPoint present; a certificate missing from it is not shown unrevoked</td></tr>`
+    ? `<tr><td>Scope</td><td><span style="color:var(--text2)">partial</span> · issuingDistributionPoint present; covers only the certificates in its scope</td></tr>`
     : '';
 
   el.innerHTML = `<table>

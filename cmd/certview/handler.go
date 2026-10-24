@@ -587,13 +587,13 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 				}
 			}
 
-			// A scoped or delta CRL shows a certificate revoked, not unrevoked.
+			// A CRL that does not cover the certificate shows it revoked, not unrevoked.
 			if authoritative && !crlChecked {
 				switch {
 				case revoked:
 					certRevocations[i] = revResult{status: "revoked", revoked: true, via: "CRL"}
 					crlChecked = true
-				case crlInfo.Scoped():
+				case !crlInfo.Covers(entry.info.CDPURLs, entry.info.IsCA):
 					if note := crlScopeNote(crlInfo); !slices.Contains(undetermined[i], note) {
 						undetermined[i] = append(undetermined[i], note)
 						resp.Warnings = append(resp.Warnings, entry.info.Subject+": "+note)
@@ -894,8 +894,10 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 	} else if !crlInfo.NextUpdate.IsZero() && now.After(crlInfo.NextUpdate) {
 		resp.Warnings = append(resp.Warnings, "CRL expired at "+nextFmt)
 	}
-	if crlInfo.Scoped() {
+	if crlInfo.IsDelta {
 		resp.Warnings = append(resp.Warnings, crlScopeNote(crlInfo)+": a certificate missing from it is not shown unrevoked")
+	} else if crlInfo.HasIDP {
+		resp.Warnings = append(resp.Warnings, fmt.Sprintf("CRL %q has issuingDistributionPoint: it covers only the certificates in its scope", crlInfo.Issuer))
 	}
 
 	// Find the CA cert that issued this CRL and verify signature against it.
@@ -1463,13 +1465,13 @@ func revokeReasonName(reason int) string {
 	return fmt.Sprintf("reason %d", reason)
 }
 
-// crlScopeNote says why a certificate missing from a scoped or delta CRL is
-// not shown unrevoked by it.
+// crlScopeNote says why a CRL that does not cover a certificate does not
+// show it unrevoked.
 func crlScopeNote(info *pki.CRLInfo) string {
 	if info.IsDelta {
 		return fmt.Sprintf("CRL %q is a delta CRL, listing only revocations since its base CRL", info.Issuer)
 	}
-	return fmt.Sprintf("CRL %q is scoped by issuingDistributionPoint and may not cover the certificate", info.Issuer)
+	return fmt.Sprintf("CRL %q is scoped by issuingDistributionPoint, which does not cover the certificate", info.Issuer)
 }
 
 func (h *handler) fetchWithInfo(ctx context.Context, kind fetchKind, url string) ([]byte, string, error) {

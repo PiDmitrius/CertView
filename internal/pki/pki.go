@@ -168,13 +168,23 @@ type CRLInfo struct {
 	NextUpdate    time.Time
 	RevokedCount  int
 	HasIDP        bool
+	IDP           *IDP // nil when HasIDP but malformed
 	IsDelta       bool
 }
 
-// Scoped reports whether the CRL may not cover every certificate of its
-// issuer, so a certificate missing from it is not shown unrevoked.
-func (i *CRLInfo) Scoped() bool {
-	return i.HasIDP || i.IsDelta
+// Covers reports whether a certificate with these CRL distribution points
+// missing from the CRL is shown unrevoked by it: never by a delta CRL, which
+// lists only revocations since its base; by a CRL with issuingDistributionPoint
+// only within its scope.
+func (i *CRLInfo) Covers(cdpURLs []string, isCA bool) bool {
+	switch {
+	case i.IsDelta:
+		return false
+	case i.HasIDP:
+		return i.IDP != nil && i.IDP.covers(cdpURLs, isCA)
+	default:
+		return true
+	}
 }
 
 // ErrCRLBadSignature is returned by CRL.Verify when CRL signature does not
@@ -509,7 +519,11 @@ func (ctx *Context) ParseCRL(data []byte) (*CRL, error) {
 		return nil, rcError("mp_crl_der", rc)
 	}
 
-	return &CRL{c: crl, Info: info, DER: C.GoBytes(unsafe.Pointer(der), C.int(derlen))}, nil
+	goDER := C.GoBytes(unsafe.Pointer(der), C.int(derlen))
+	if info.HasIDP {
+		info.IDP, _ = parseIDP(goDER)
+	}
+	return &CRL{c: crl, Info: info, DER: goDER}, nil
 }
 
 // Close frees the CRL and returns the freed heap to the OS: a parsed large

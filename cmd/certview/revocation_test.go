@@ -74,19 +74,20 @@ func TestOCSPShowsUnrevokedOnlyWhenGoodAndCurrent(t *testing.T) {
 	}
 }
 
-func TestScopedCRLShowsRevokedNotUnrevoked(t *testing.T) {
+func TestCRLShowsUnrevokedOnlyWhenItCoversTheCertificate(t *testing.T) {
 	root := testIssue(t, "CRL Root", nil, true, nil)
 	deltaIndicator, err := asn1.Marshal(big.NewInt(1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// issuingDistributionPoint with the CRL's own URI as distributionPoint
-	idp := func(uri string) []byte {
+	// issuingDistributionPoint naming uri, with extra fields such as onlyContainsCACerts
+	idp := func(uri string, extra ...byte) []pkix.Extension {
 		gn := append([]byte{0x86, byte(len(uri))}, uri...)
 		full := append([]byte{0xA0, byte(len(gn))}, gn...)
-		dp := append([]byte{0xA0, byte(len(full))}, full...)
-		return append([]byte{0x30, byte(len(dp))}, dp...)
+		dp := append(append([]byte{0xA0, byte(len(full))}, full...), extra...)
+		return []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 28}, Critical: true, Value: append([]byte{0x30, byte(len(dp))}, dp...)}}
 	}
+	onlyCA := []byte{0x82, 0x01, 0xFF}
 	for _, tc := range []struct {
 		name    string
 		ext     func(url string) []pkix.Extension
@@ -97,12 +98,10 @@ func TestScopedCRLShowsRevokedNotUnrevoked(t *testing.T) {
 		{"delta", func(string) []pkix.Extension {
 			return []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 27}, Critical: true, Value: deltaIndicator}}
 		}, false, ""},
-		{"idp", func(url string) []pkix.Extension {
-			return []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 28}, Critical: true, Value: idp(url)}}
-		}, false, ""},
-		{"idp revoked", func(url string) []pkix.Extension {
-			return []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 28}, Critical: true, Value: idp(url)}}
-		}, true, "revoked"},
+		{"idp of the certificate", func(url string) []pkix.Extension { return idp(url) }, false, "not_revoked"},
+		{"idp of another partition", func(url string) []pkix.Extension { return idp(url + ".other") }, false, ""},
+		{"idp of CA certificates", func(url string) []pkix.Extension { return idp(url, onlyCA...) }, false, ""},
+		{"idp revoked", func(url string) []pkix.Extension { return idp(url + ".other") }, true, "revoked"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			url := "http://crl.test/" + strings.ReplaceAll(tc.name, " ", "-") + ".crl"
