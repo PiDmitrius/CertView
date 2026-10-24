@@ -410,14 +410,18 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 	}
 
 	rl.f("chain: %d certs total", len(chain))
+	// The archive keeps the chain and up to maxChainDepth certificates a site
+	// presented; other AIA certificates serve only this analysis.
 	for _, entry := range chain[1:] {
 		if !transient[string(entry.info.DER)] {
 			h.archive(rl, entry.info, entry.source)
 		}
 	}
-	for _, c := range aiaBag {
-		if c.source != "archive" && !transient[string(c.info.DER)] {
+	siteCerts := 0
+	for _, c := range bag {
+		if c.source == "tls" && siteCerts < maxChainDepth {
 			h.archive(rl, c.info, c.source)
+			siteCerts++
 		}
 	}
 	for _, entry := range chain {

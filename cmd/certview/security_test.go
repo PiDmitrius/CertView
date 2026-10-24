@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"math/big"
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/crypto/ocsp"
 
 	"github.com/PiDmitrius/certview/internal/ssrfguard"
+	"github.com/PiDmitrius/certview/internal/store"
 )
 
 func trustRoot(t *testing.T, h *handler, root *testCA) {
@@ -142,5 +144,30 @@ func TestOversizedInputRejectedBeforeParsing(t *testing.T) {
 	resp := analyzeWith(t, h, bytes.Repeat([]byte{'A'}, 3*64<<10))
 	if !strings.HasPrefix(resp.Verify.Message, "Input too large") {
 		t.Fatalf("verify %q", resp.Verify.Message)
+	}
+}
+
+func TestOnlyChainCertificatesFromAIAAreArchived(t *testing.T) {
+	root := testIssue(t, "AIA Root", nil, true, nil)
+	inter := testIssue(t, "AIA CA", root, true, nil)
+	url := "http://aia.test/bundle.pem"
+	leaf := testIssue(t, "AIA Leaf", inter, false, func(c *x509.Certificate) { c.IssuingCertificateURL = []string{url} })
+	extra := []*testCA{testIssue(t, "Unrelated 1", nil, true, nil), testIssue(t, "Unrelated 2", nil, true, nil)}
+	var bundle bytes.Buffer
+	for _, c := range append([]*testCA{inter}, extra...) {
+		pem.Encode(&bundle, &pem.Block{Type: "CERTIFICATE", Bytes: c.cert.Raw})
+	}
+	h := newTestHandler(t, fakeNet{url: func(*http.Request) []byte { return bundle.Bytes() }})
+	resp := analyzeWith(t, h, leaf.cert.Raw, root.cert.Raw)
+	if len(resp.Chain) != 3 {
+		t.Fatalf("chain of %d", len(resp.Chain))
+	}
+	if !h.store.HasDER(store.SHA256Hex(inter.cert.Raw)) {
+		t.Fatal("chain CA from AIA not archived")
+	}
+	for _, c := range extra {
+		if h.store.HasDER(store.SHA256Hex(c.cert.Raw)) {
+			t.Fatalf("%s from AIA archived", c.cert.Subject.CommonName)
+		}
 	}
 }
