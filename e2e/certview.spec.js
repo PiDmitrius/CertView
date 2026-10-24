@@ -141,6 +141,31 @@ test.describe('certificate links', () => {
   });
 });
 
+test.describe('concurrent loads', () => {
+  test('a newer input wins over a slower earlier one', async ({ page }) => {
+    await page.route('**/api/site', async route => {
+      await new Promise(r => setTimeout(r, 2000));
+      await route.fulfill({ status: 502, body: 'slow failure' }).catch(() => {});
+    });
+    await page.route('**/api/analyze', route => route.fulfill({ json: {
+      chain: [{ subject: 'CN = Fast Leaf', issuer: 'CN = Fast Leaf', serial: '01', path_len: -1,
+        not_before: '2026-01-01T00:00:00Z', not_after: '2027-01-01T00:00:00Z',
+        is_ca: false, is_self_signed: true, thumbprint_sha1: 'AA', thumbprint_sha256: 'BB', stored: false }],
+      verify: { status: 'no_chain', trusted: false, revocation_status: 'na' },
+    } }));
+    await page.goto(baseURL + '/');
+    await page.fill('#pem-input', 'slow.example');
+    await page.click('#pem-btn');
+    await page.fill('#pem-input', '-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----');
+    await page.click('#pem-btn');
+    await expectReady(page);
+    await page.waitForTimeout(2500);
+    await expect(page.locator('#error-box')).not.toHaveClass(/active/);
+    await expect(page.locator('#chain-tree')).toContainText('Fast Leaf');
+    await expect(page.locator('#loading')).not.toHaveClass(/active/);
+  });
+});
+
 test.describe('revocation details', () => {
   const revokedAt = '2026-10-01T12:00:00Z';
   const cert = (cn, extra) => ({

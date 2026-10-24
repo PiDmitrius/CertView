@@ -609,44 +609,52 @@ async function sendFile(file) {
   sendBytes(new Uint8Array(buf));
 }
 
-async function sendBytes(bytes) {
-  window.__rerun = () => sendBytes(bytes);
+// Only the latest load shows: starting one aborts the one before, whose
+// response and errors are then dropped.
+let currentLoad = null;
+async function runLoad(rerun, work) {
+  window.__rerun = rerun;
+  if (currentLoad) currentLoad.abort();
+  const load = currentLoad = new AbortController();
   loading.classList.add('active');
   results.classList.remove('active');
   clearError();
-  clearSiteUI();
-
   try {
-    const resp = await fetch('/api/analyze', {
-      method: 'POST',
-      body: bytes,
-    });
-    const data = await resp.json();
-    render(data);
-    updateHashFromData(data);
+    await work(load.signal);
   } catch (e) {
-    showError('Request failed', e.message);
+    if (!load.signal.aborted) showError('Request failed', e.message);
   } finally {
-    loading.classList.remove('active');
+    if (currentLoad === load) loading.classList.remove('active');
   }
 }
 
-async function loadByThumbprint(tp) {
-  window.__rerun = () => loadByThumbprint(tp);
-  loading.classList.add('active');
-  results.classList.remove('active');
-  clearError();
-  clearSiteUI();
-  try {
-    const resp = await fetch('/api/cert/' + encodeURIComponent(tp));
-    if (!resp.ok) throw new Error('not found: ' + tp);
-    const data = await resp.json();
-    render(data);
-  } catch (e) {
-    showError('Load failed', e.message);
-  } finally {
-    loading.classList.remove('active');
-  }
+// Fetches for a load: the response with its JSON, or its text on an error
+// status; null once a newer load started.
+async function loadFetch(signal, url, opts) {
+  const resp = await fetch(url, {...opts, signal});
+  const body = resp.ok ? await resp.json() : (await resp.text()).trim();
+  return signal.aborted ? null : {resp, body};
+}
+
+function sendBytes(bytes) {
+  return runLoad(() => sendBytes(bytes), async signal => {
+    clearSiteUI();
+    const r = await loadFetch(signal, '/api/analyze', {method: 'POST', body: bytes});
+    if (!r) return;
+    if (!r.resp.ok) return showError('Request failed', r.body);
+    render(r.body);
+    updateHashFromData(r.body);
+  });
+}
+
+function loadByThumbprint(tp) {
+  return runLoad(() => loadByThumbprint(tp), async signal => {
+    clearSiteUI();
+    const r = await loadFetch(signal, '/api/cert/' + encodeURIComponent(tp));
+    if (!r) return;
+    if (!r.resp.ok) return showError('Load failed', r.resp.status === 404 ? 'not found: ' + tp : r.body);
+    render(r.body);
+  });
 }
 
 // #cert=<base64url DER>[&cert=…]: the certificates of a link, leaf first
@@ -655,30 +663,19 @@ function linkCerts(hash) {
   return new URLSearchParams(hash.slice(1)).getAll('cert');
 }
 
-async function loadLink(certs) {
-  window.__rerun = () => loadLink(certs);
-  loading.classList.add('active');
-  results.classList.remove('active');
-  clearError();
-  resetSiteState();
-  try {
-    const resp = await fetch('/api/link', {
+function loadLink(certs) {
+  return runLoad(() => loadLink(certs), async signal => {
+    resetSiteState();
+    const r = await loadFetch(signal, '/api/link', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({certs}),
     });
-    if (!resp.ok) {
-      const t = (await resp.text()).trim();
-      if (resp.status === 400) showError('Bad link', t.replace(/^Bad link: /, ''));
-      else showError('Load failed', t);
-      return;
-    }
-    render(await resp.json());
-  } catch (e) {
-    showError('Load failed', e.message);
-  } finally {
-    loading.classList.remove('active');
-  }
+    if (!r) return;
+    if (r.resp.status === 400) return showError('Bad link', r.body.replace(/^Bad link: /, ''));
+    if (!r.resp.ok) return showError('Load failed', r.body);
+    render(r.body);
+  });
 }
 
 // Loads what the address names: a site, with the thumbprint of the leaf
@@ -695,34 +692,22 @@ function route() {
   else if (hash.length > 1) loadByThumbprint(hash.slice(1));
 }
 
-async function fetchSite(url) {
-  window.__rerun = () => fetchSite(url);
-  loading.classList.add('active');
-  results.classList.remove('active');
-  clearError();
-  resetSiteState();
-  activeTabIdx = 0;
-  try {
-    const resp = await fetch('/api/site', {
+function fetchSite(url) {
+  return runLoad(() => fetchSite(url), async signal => {
+    resetSiteState();
+    activeTabIdx = 0;
+    const r = await loadFetch(signal, '/api/site', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({url}),
     });
-    if (!resp.ok) {
-      const t = await resp.text();
-      showError('Site fetch failed', t.trim());
-      return;
-    }
-    const data = await resp.json();
-    siteData = data;
-    pemInput.value = canonicalSiteString(data.host, data.port);
-    renderSite(data);
-    updateSitePath(data.host, data.port);
-  } catch (e) {
-    showError('Request failed', e.message);
-  } finally {
-    loading.classList.remove('active');
-  }
+    if (!r) return;
+    if (!r.resp.ok) return showError('Site fetch failed', r.body);
+    siteData = r.body;
+    pemInput.value = canonicalSiteString(siteData.host, siteData.port);
+    renderSite(siteData);
+    updateSitePath(siteData.host, siteData.port);
+  });
 }
 
 function canonicalSiteString(host, port) {
@@ -732,55 +717,41 @@ function canonicalSiteString(host, port) {
   return hp;
 }
 
-async function loadSiteByPath(hostport, targetThumb) {
-  window.__rerun = () => loadSiteByPath(hostport, targetThumb);
-  loading.classList.add('active');
-  results.classList.remove('active');
-  clearError();
-  resetSiteState();
-  activeTabIdx = 0;
-  pemInput.value = hostport;
-  try {
-    const resp = await fetch('/api/site/' + encodeURIComponent(hostport));
-    if (!resp.ok) {
-      const t = await resp.text();
-      showError('Site load failed', t.trim());
-      return;
-    }
-    const data = await resp.json();
-    siteData = data;
+function loadSiteByPath(hostport, targetThumb) {
+  return runLoad(() => loadSiteByPath(hostport, targetThumb), async signal => {
+    resetSiteState();
+    activeTabIdx = 0;
+    pemInput.value = hostport;
+    const r = await loadFetch(signal, '/api/site/' + encodeURIComponent(hostport));
+    if (!r) return;
+    if (!r.resp.ok) return showError('Site load failed', r.body);
+    siteData = r.body;
     let missing = false;
     if (targetThumb) {
-      const idx = data.results.findIndex(r =>
-        r.ok && r.analysis && r.analysis.chain[0] &&
-        r.analysis.chain[0].thumbprint_sha1 === targetThumb);
+      const idx = siteData.results.findIndex(x =>
+        x.ok && x.analysis && x.analysis.chain[0] &&
+        x.analysis.chain[0].thumbprint_sha1 === targetThumb);
       if (idx >= 0) activeTabIdx = idx;
       else missing = true;
     }
-    renderSite(data);
-    if (missing) noteMissingThumb(hostport, targetThumb);
-  } catch (e) {
-    showError('Request failed', e.message);
-  } finally {
-    loading.classList.remove('active');
-  }
+    renderSite(siteData);
+    if (missing) await noteMissingThumb(signal, hostport, targetThumb);
+  });
 }
 
 // The certificate a site link names is not served by the site now: say so,
 // link it from the archive when stored, and keep only the site in the address.
-async function noteMissingThumb(hostport, tp) {
+async function noteMissingThumb(signal, hostport, tp) {
   window.history.replaceState(null, '', '/' + hostport);
   const short = tp.length > 16 ? tp.slice(0, 16) + '…' : tp;
   const notice = document.getElementById('site-notice');
   notice.textContent = `Certificate ${short} from the link is not served by the site now; showing the current one.`;
-  try {
-    const resp = await fetch('/api/cert/' + encodeURIComponent(tp), { method: 'HEAD' });
-    if (!resp.ok) return;
-    const a = document.createElement('a');
-    a.href = '/#' + tp;
-    a.textContent = 'Open it from the archive';
-    notice.append(' ', a);
-  } catch (e) {}
+  const resp = await fetch('/api/cert/' + encodeURIComponent(tp), {method: 'HEAD', signal}).catch(() => null);
+  if (!resp || !resp.ok || signal.aborted) return;
+  const a = document.createElement('a');
+  a.href = '/#' + tp;
+  a.textContent = 'Open it from the archive';
+  notice.append(' ', a);
 }
 
 function renderSite(data) {
