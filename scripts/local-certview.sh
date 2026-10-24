@@ -128,6 +128,7 @@ browser_e2e() {
   node_volume="certview-e2e-node-${version}"
   docker volume inspect "$node_volume" >/dev/null 2>&1 || docker volume create "$node_volume" >/dev/null
   docker run --rm -v "${node_volume}:/nm" debian:bookworm-slim chown "$(id -u):$(id -g)" /nm
+  mkdir -p "$ROOT/node_modules"
   docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp \
     -v "$ROOT":/src -v "${node_volume}:/src/node_modules" -w /src \
     -e CERTVIEW_E2E_BASE_URL="http://127.0.0.1:${HTTP_PORT}" \
