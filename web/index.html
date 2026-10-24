@@ -604,9 +604,9 @@ pemBtn.addEventListener('click', () => {
   }
 });
 
-async function sendFile(file) {
-  const buf = await file.arrayBuffer();
-  sendBytes(new Uint8Array(buf));
+function sendFile(file) {
+  return runLoad(() => sendFile(file), async signal =>
+    analyzeBytes(signal, new Uint8Array(await file.arrayBuffer())));
 }
 
 // Only the latest load shows: starting one aborts the one before, whose
@@ -637,14 +637,17 @@ async function loadFetch(signal, url, opts) {
 }
 
 function sendBytes(bytes) {
-  return runLoad(() => sendBytes(bytes), async signal => {
-    clearSiteUI();
-    const r = await loadFetch(signal, '/api/analyze', {method: 'POST', body: bytes});
-    if (!r) return;
-    if (!r.resp.ok) return showError('Request failed', r.body);
-    render(r.body);
-    updateHashFromData(r.body);
-  });
+  return runLoad(() => sendBytes(bytes), signal => analyzeBytes(signal, bytes));
+}
+
+async function analyzeBytes(signal, bytes) {
+  if (signal.aborted) return;
+  clearSiteUI();
+  const r = await loadFetch(signal, '/api/analyze', {method: 'POST', body: bytes});
+  if (!r) return;
+  if (!r.resp.ok) return showError('Request failed', r.body);
+  render(r.body);
+  updateHashFromData(r.body);
 }
 
 function loadByThumbprint(tp) {
@@ -726,13 +729,14 @@ function loadSiteByPath(hostport, targetThumb) {
     if (!r) return;
     if (!r.resp.ok) return showError('Site load failed', r.body);
     siteData = r.body;
+    // The link's certificate is gone only when every TLS client got a chain without it
     let missing = false;
     if (targetThumb) {
       const idx = siteData.results.findIndex(x =>
         x.ok && x.analysis && x.analysis.chain[0] &&
         x.analysis.chain[0].thumbprint_sha1 === targetThumb);
       if (idx >= 0) activeTabIdx = idx;
-      else missing = true;
+      else missing = siteData.results.every(x => x.ok && x.analysis);
     }
     renderSite(siteData);
     if (missing) await noteMissingThumb(signal, hostport, targetThumb);
@@ -920,7 +924,7 @@ function render(data) {
   const verifyEl = document.getElementById('verify-result');
   let cls = 'error';
   if (vr.status === 'ok') cls = 'ok';
-  else if (vr.status === 'no_crl' || vr.status === 'no_chain') cls = 'warn';
+  else if (vr.status === 'warn' || vr.status === 'no_crl' || vr.status === 'no_chain') cls = 'warn';
   let label = vr.status === 'ok' ? 'Valid' : (vr.message || vr.status);
   let html = `<span class="verify-badge ${cls}">${esc(label)}</span>`;
   const cryptoBadge = chainCryptoBadge(chain);
@@ -933,7 +937,7 @@ function render(data) {
     html += ` <span class="verify-badge warn" title="Chain built but root is not in trust store">Untrusted root</span>`;
   }
   if (vr.revocation_status === 'checked') {
-    html += ` <span class="verify-badge ok" title="All CRLs fetched, no certs revoked">Revocation checked</span>`;
+    html += ` <span class="verify-badge ok" title="Revocation determined for every certificate: none revoked">Revocation checked</span>`;
   } else if (vr.revocation_status === 'incomplete') {
     html += ` <span class="verify-badge warn" title="${esc(vr.revocation_msg||'')}">Revocation unknown</span>`;
   } else if (vr.revocation_status === 'na') {

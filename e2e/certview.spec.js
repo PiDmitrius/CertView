@@ -79,6 +79,19 @@ test.describe('certview site links', () => {
     await expect(notice).toBeEmpty();
   });
 
+  test('keeps a site link when no TLS client reached the site', async ({ page }) => {
+    const host = 'down.example';
+    await page.route('**/api/site/' + host, route => route.fulfill({ json: {
+      host, port: 443, sni: host,
+      results: [{ client: 'Global', ok: false, error: 'timeout' }, { client: 'GOST', ok: false, error: 'timeout' }],
+    } }));
+    const link = baseURL + '/' + host + '#' + 'A'.repeat(40);
+    await page.goto(link);
+    await waitIdle(page);
+    await expect(page.locator('#site-notice')).toBeEmpty();
+    expect(page.url()).toBe(link);
+  });
+
   test('shows in-page error without dialog for unresolved host', async ({ page }) => {
     await page.goto(baseURL + '/');
     await page.fill('#pem-input', unresolvedHost);
@@ -163,6 +176,30 @@ test.describe('concurrent loads', () => {
     await expect(page.locator('#error-box')).not.toHaveClass(/active/);
     await expect(page.locator('#chain-tree')).toContainText('Fast Leaf');
     await expect(page.locator('#loading')).not.toHaveClass(/active/);
+  });
+
+  test('a file read slower than a newer input does not replace it', async ({ page }) => {
+    await page.addInitScript(() => {
+      const read = File.prototype.arrayBuffer;
+      File.prototype.arrayBuffer = function () {
+        return new Promise(r => setTimeout(r, 1500)).then(() => read.call(this));
+      };
+    });
+    const leaf = cn => ({ json: {
+      chain: [{ subject: 'CN = ' + cn, issuer: 'CN = ' + cn, serial: '01', path_len: -1,
+        not_before: '2026-01-01T00:00:00Z', not_after: '2027-01-01T00:00:00Z',
+        is_ca: false, is_self_signed: true, thumbprint_sha1: 'AA', thumbprint_sha256: 'BB', stored: false }],
+      verify: { status: 'no_chain', trusted: false, revocation_status: 'na' },
+    } });
+    await page.route('**/api/analyze', route =>
+      route.fulfill(leaf(route.request().postData().includes('OLDFILE') ? 'Old File' : 'Fast Leaf')));
+    await page.goto(baseURL + '/');
+    await page.setInputFiles('#file-input', { name: 'old.pem', mimeType: 'text/plain', buffer: Buffer.from('OLDFILE') });
+    await page.fill('#pem-input', '-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----');
+    await page.click('#pem-btn');
+    await expectReady(page);
+    await page.waitForTimeout(2500);
+    await expect(page.locator('#chain-tree')).toContainText('Fast Leaf');
   });
 });
 
