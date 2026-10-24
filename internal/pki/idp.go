@@ -8,8 +8,8 @@ import (
 	cbasn1 "golang.org/x/crypto/cryptobyte/asn1"
 )
 
-// IDP is the issuingDistributionPoint of a CRL (RFC 5280 §5.2.5).
-type IDP struct {
+// idpScope is the issuingDistributionPoint of a CRL (RFC 5280 §5.2.5).
+type idpScope struct {
 	HasDP       bool     // distributionPoint present
 	URIs        []string // its fullName URIs
 	OnlyUser    bool
@@ -23,7 +23,7 @@ type IDP struct {
 // CRL distribution points (RFC 5280 §6.3.3 b): its distributionPoint names
 // one of them, its certificate kind fits, and it covers all reasons of the
 // certificate's own issuer.
-func (i *IDP) covers(cdpURLs []string, isCA bool) bool {
+func (i *idpScope) covers(cdpURLs []string, isCA bool) bool {
 	if i.SomeReasons || i.Indirect || i.OnlyAttr || i.OnlyUser && isCA || i.OnlyCA && !isCA {
 		return false
 	}
@@ -42,7 +42,7 @@ var oidIDP = []byte{0x55, 0x1d, 0x1c} // 2.5.29.28
 
 // parseIDP reads the issuingDistributionPoint of a DER CRL, skipping its
 // revoked certificates unparsed; nil without one.
-func parseIDP(crl []byte) (*IDP, error) {
+func parseIDP(crl []byte) (*idpScope, error) {
 	errMalformed := errors.New("malformed CRL")
 	input := cryptobyte.String(crl)
 	var list, tbs cryptobyte.String
@@ -80,13 +80,13 @@ func parseIDP(crl []byte) (*IDP, error) {
 	return nil, nil
 }
 
-func parseIDPValue(value cryptobyte.String) (*IDP, error) {
+func parseIDPValue(value cryptobyte.String) (*idpScope, error) {
 	errMalformed := errors.New("malformed issuingDistributionPoint")
 	var seq cryptobyte.String
 	if !value.ReadASN1(&seq, cbasn1.SEQUENCE) {
 		return nil, errMalformed
 	}
-	idp := &IDP{}
+	idp := &idpScope{}
 	flag := func(field cryptobyte.String) bool { return len(field) == 1 && field[0] != 0 }
 	for !seq.Empty() {
 		var field cryptobyte.String

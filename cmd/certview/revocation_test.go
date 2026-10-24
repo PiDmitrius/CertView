@@ -151,3 +151,23 @@ func TestOCSPRevocationDateAndReason(t *testing.T) {
 		t.Fatalf("OCSP response %+v", o)
 	}
 }
+
+func TestCRLOfAnotherIssuerShowsNothing(t *testing.T) {
+	root := testIssue(t, "Other Root", nil, true, nil)
+	inter := testIssue(t, "Other CA", root, true, nil)
+	url := "http://crl.test/root.crl"
+	leaf := testIssue(t, "Leaf under CA", inter, false, func(c *x509.Certificate) { c.CRLDistributionPoints = []string{url} })
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number: big.NewInt(1), ThisUpdate: time.Now().Add(-time.Hour), NextUpdate: time.Now().Add(time.Hour),
+	}, root.cert, root.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := analyzeWith(t, newTestHandler(t, fakeNet{url: func(*http.Request) []byte { return der }}), leaf.cert.Raw, inter.cert.Raw, root.cert.Raw)
+	if r := resp.Chain[0].Revocation; r != nil {
+		t.Fatalf("revocation %q from the root's CRL", r.Status)
+	}
+	if !strings.Contains(resp.Verify.RevocationMsg, "not issued by the certificate's issuer") {
+		t.Fatalf("revocation message %q", resp.Verify.RevocationMsg)
+	}
+}

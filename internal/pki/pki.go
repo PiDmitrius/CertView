@@ -7,6 +7,7 @@ package pki
 */
 import "C"
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"time"
@@ -168,20 +169,20 @@ type CRLInfo struct {
 	NextUpdate    time.Time
 	RevokedCount  int
 	HasIDP        bool
-	IDP           *IDP // nil when HasIDP but malformed
 	IsDelta       bool
+	idp           *idpScope // nil when HasIDP but malformed
 }
 
-// Covers reports whether a certificate with these CRL distribution points
-// missing from the CRL is shown unrevoked by it: never by a delta CRL, which
-// lists only revocations since its base; by a CRL with issuingDistributionPoint
-// only within its scope.
-func (i *CRLInfo) Covers(cdpURLs []string, isCA bool) bool {
+// Covers reports whether cert missing from the CRL is shown unrevoked by it:
+// only by a CRL of cert's issuer; never by a delta CRL, which lists only
+// revocations since its base; by a CRL with issuingDistributionPoint only
+// within its scope.
+func (i *CRLInfo) Covers(cert *CertInfo) bool {
 	switch {
-	case i.IsDelta:
+	case !bytes.Equal(i.IssuerNameDER, cert.IssuerNameDER), i.IsDelta:
 		return false
 	case i.HasIDP:
-		return i.IDP != nil && i.IDP.covers(cdpURLs, isCA)
+		return i.idp != nil && i.idp.covers(cert.CDPURLs, cert.IsCA)
 	default:
 		return true
 	}
@@ -521,7 +522,7 @@ func (ctx *Context) ParseCRL(data []byte) (*CRL, error) {
 
 	goDER := C.GoBytes(unsafe.Pointer(der), C.int(derlen))
 	if info.HasIDP {
-		info.IDP, _ = parseIDP(goDER)
+		info.idp, _ = parseIDP(goDER)
 	}
 	return &CRL{c: crl, Info: info, DER: goDER}, nil
 }
