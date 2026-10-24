@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha1"
-	"crypto/sha256"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/base64"
@@ -186,8 +186,6 @@ func decodeKeyUsage(ku uint32) []string {
 }
 
 func (h *handler) certToJSON(c *pki.CertInfo, source string) certJSON {
-	s1 := sha1.Sum(c.DER)
-	s256 := sha256.Sum256(c.DER)
 	// Cross-signed: subject == issuer at byte level, but not actually self-signed.
 	// This means another CA with the same name (typically same identity, different
 	// key) signed this cert — common during CA key rotation.
@@ -216,8 +214,8 @@ func (h *handler) certToJSON(c *pki.CertInfo, source string) certJSON {
 		AIAURLs:            c.AIAURLs,
 		OCSPURLs:           c.OCSPURLs,
 		CDPURLs:            c.CDPURLs,
-		ThumbprintSHA1:     strings.ToUpper(hex.EncodeToString(s1[:])),
-		ThumbprintSHA256:   strings.ToUpper(hex.EncodeToString(s256[:])),
+		ThumbprintSHA1:     sha1Hex(c.DER),
+		ThumbprintSHA256:   store.SHA256Hex(c.DER),
 		derJSON:            h.derRef(c.DER),
 		Stored:             h.store.HasDER(store.SHA256Hex(c.DER)),
 		Source:             source,
@@ -275,7 +273,7 @@ func nvl(s, fallback string) string {
 }
 
 func (h *handler) analyze(w http.ResponseWriter, r *http.Request) {
-	releaseIO, err := acquireBigIO(r.Context(), r.ContentLength)
+	releaseIO, err := acquireBig(r.Context(), bigIO, r.ContentLength)
 	if err != nil {
 		writeAnalysisError(w, err)
 		return
@@ -338,6 +336,12 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		return nil, err
 	}
 
+	// Bound the input before parsing: a certificate is at most CertSize as
+	// DER, and its PEM form is under twice that.
+	if len(data) > 2*limits.CertSize {
+		resp.Verify = verifyJSON{Status: "error", Message: fmt.Sprintf("Input too large for a certificate: %d bytes", len(data))}
+		return resp, nil
+	}
 	leaf, err := h.ctx.ParseCertInfo(data)
 	if err != nil {
 		rl.f("PARSE FAILED: %v", err)
@@ -552,6 +556,9 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			if crlIssuer == nil {
 				sigMsg = "issuer CA not in chain — signature not verified"
 				sigWarn = fmt.Sprintf("CRL %q: %s", crlInfo.Issuer, sigMsg)
+			} else if !crlIssuer.CanSignCRL() {
+				sigMsg = "issuer certificate may not sign CRLs"
+				sigWarn = fmt.Sprintf("CRL %q: %s", crlInfo.Issuer, sigMsg)
 			} else if err := crl.Verify(h.ctx, crlIssuer.DER); err != nil {
 				if errors.Is(err, pki.ErrCRLBadSignature) {
 					sigStatus = "bad"
@@ -680,8 +687,8 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			crl, closeCRL, err := h.fetchCRL(ctx, rl, url)
 			if err != nil {
 				rl.f("crl[%d]: FAILED url=%s err=%v", i, url, err)
-				fetchErrors = append(fetchErrors, fmt.Sprintf("%s: %v", url, err))
-				undecided(i, fmt.Sprintf("CRL %s: %v", url, err))
+				fetchErrors = append(fetchErrors, url+": "+publicError(err))
+				undecided(i, "CRL "+url+": "+publicError(err))
 				continue
 			}
 			processCRL(crl, "fetched", url)
@@ -713,6 +720,16 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			ocspRes, source, url, failure := h.resolveOCSP(ctx, rl, i, entry.info, chain[issuerIdx].info)
 			if failure != "" {
 				undecided(i, failure)
+			}
+			// Fetched responses are kept when their issuer verifies to a trusted root.
+			if ocspRes != nil && source == "fetched" && ocspRes.Verified && !ocspRes.NextUpdate.IsZero() {
+				issuer := chain[issuerIdx].info
+				if _, ok := h.trustedPath(issuer.DER, roots, intermediates, transient); !ok {
+					rl.f("ocsp[%d]: not saved, issuer has no trusted anchor", i)
+				} else if err := h.store.SaveOCSP(sha1Hex(entry.info.DER), url, ocspRes.Status, ocspRes.DER,
+					ocspRes.ThisUpdate, ocspRes.NextUpdate, ocspRes.ProducedAt); err != nil {
+					rl.f("ocsp[%d]: store save: %v", i, err)
+				}
 			}
 			if ocspRes != nil {
 				note := ""
@@ -920,7 +937,7 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 			if err != nil {
 				continue
 			}
-			if crlInfo.AKI != "" && info.SKI != "" && crlInfo.AKI != info.SKI {
+			if crlInfo.AKI != "" && info.SKI != "" && crlInfo.AKI != info.SKI || !info.CanSignCRL() {
 				continue
 			}
 			caInfo = info
@@ -959,6 +976,8 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 
 		if !h.chainsToTrust(caInfo) {
 			rl.f("uploaded CRL not saved: issuer chain has no trusted anchor")
+		} else if !crlInfo.NextUpdate.IsZero() && now.After(crlInfo.NextUpdate) {
+			rl.f("uploaded CRL not saved: expired")
 		} else if err := h.store.SaveCRL(crlInfo.Issuer, "", crl.DER, crlInfo.ThisUpdate, crlInfo.NextUpdate); err != nil {
 			rl.f("store.SaveCRL(uploaded): %v", err)
 		} else {
@@ -1147,7 +1166,7 @@ func (h *handler) resolveIssuer(ctx context.Context, rl reqLog, cert *pki.CertIn
 		data, contentType, err := h.fetchWithInfo(ctx, fetchAIA, url)
 		if err != nil {
 			rl.f("  fetch AIA: FAILED %v", err)
-			resp.Warnings = append(resp.Warnings, "AIA fetch failed ("+url+"): "+err.Error())
+			resp.Warnings = append(resp.Warnings, "AIA fetch failed ("+url+"): "+publicError(err))
 			continue
 		}
 		rl.f("  fetch AIA: %d bytes, content-type=%s", len(data), contentType)
@@ -1295,7 +1314,7 @@ func (h *handler) derBySHA256(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	release, err := acquireBigIO(r.Context(), int64(size))
+	release, err := acquireBig(r.Context(), bigDER, int64(size))
 	if err != nil {
 		writeAnalysisError(w, err)
 		return
@@ -1310,7 +1329,8 @@ func (h *handler) derBySHA256(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(derWriteTime))
+	// A reader slower than 1 MiB/s does not hold a transfer slot for long
+	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10*time.Second + time.Duration(len(der))*time.Second/(1<<20)))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Write(der)
@@ -1346,7 +1366,13 @@ func (h *handler) untrust(w http.ResponseWriter, r *http.Request) {
 	h.toggleTrust(w, r, false)
 }
 
+// toggleTrust takes only a JSON body, which a simple cross-site POST from a
+// page in the administrator's browser cannot send.
 func (h *handler) toggleTrust(w http.ResponseWriter, r *http.Request, trusted bool) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		http.Error(w, "JSON body required", http.StatusUnsupportedMediaType)
+		return
+	}
 	var req struct {
 		SHA256 string `json:"sha256"`
 		DER    []byte `json:"der_b64"`
@@ -1384,8 +1410,7 @@ func (h *handler) toggleTrust(w http.ResponseWriter, r *http.Request, trusted bo
 // resolveOCSP returns the OCSP response for cert, cached or fetched, with its
 // source and URL; without one, why the responders gave none usable.
 func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.CertInfo, issuer *pki.CertInfo) (*pki.OCSPResult, string, string, string) {
-	s1 := sha1.Sum(cert.DER)
-	thumb := strings.ToUpper(hex.EncodeToString(s1[:]))
+	thumb := sha1Hex(cert.DER)
 
 	// 1. Cache lookup
 	if der, err := h.store.FindFreshOCSP(thumb); err == nil && der != nil {
@@ -1425,12 +1450,6 @@ func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.C
 			res.ThisUpdate.Format("2006-01-02"),
 			res.NextUpdate.Format("2006-01-02"))
 
-		if res.Verified && !res.NextUpdate.IsZero() {
-			if err := h.store.SaveOCSP(thumb, url, res.Status, res.DER,
-				res.ThisUpdate, res.NextUpdate, res.ProducedAt); err != nil {
-				rl.f("  ocsp[%d]: store save: %v", i, err)
-			}
-		}
 		return res, "fetched", url, ""
 	}
 	return nil, "", "", failure
@@ -1439,6 +1458,11 @@ func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.C
 // ocspUnverifiedNote: MiniPKI verifies both the signature and the validity
 // period of a response; its dates are shown with it.
 const ocspUnverifiedNote = "OCSP response not verified: bad signature or not current"
+
+func sha1Hex(der []byte) string {
+	s := sha1.Sum(der)
+	return strings.ToUpper(hex.EncodeToString(s[:]))
+}
 
 func ocspRevokedAt(res *pki.OCSPResult) string {
 	if res.RevokedAt.IsZero() {
@@ -1521,8 +1545,14 @@ func (h *handler) doFetch(req *http.Request, kind fetchKind) ([]byte, string, er
 
 	contentType := resp.Header.Get("Content-Type")
 	if resp.StatusCode != http.StatusOK {
-		return nil, contentType, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, contentType, &statusError{resp.StatusCode}
 	}
-	data, err := readLimited(resp.Body, resp.ContentLength, kind.maxBytes)
+	body := bufio.NewReader(resp.Body)
+	if kind == fetchCRL {
+		if err := checkObjectStart(body, kind.maxBytes); err != nil {
+			return nil, contentType, err
+		}
+	}
+	data, err := readLimited(body, resp.ContentLength, kind.maxBytes)
 	return data, contentType, err
 }

@@ -17,11 +17,14 @@ package main
 // cache TTL. A shared download is cancelled when its last waiter leaves.
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -29,6 +32,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/PiDmitrius/certview/internal/ssrfguard"
 )
 
 const (
@@ -39,7 +44,7 @@ const (
 	bigCRLQueue     = 2
 	bigTransfers    = 2
 	bigTransferSize = 1 << 20
-	derWriteTime    = 5 * time.Minute
+	maxPending      = 64
 
 	maxCRLSize       = 128 << 20
 	maxFetches       = 20
@@ -67,6 +72,8 @@ var (
 var (
 	errBusy  = errors.New("server busy, try again later")
 	slots    = make(chan struct{}, runtime.NumCPU())
+	pending  = make(chan struct{}, maxPending)
+	bigDER   = make(chan struct{}, bigTransfers)
 	bigCRL   = make(chan struct{}, 1)
 	bigIO    = make(chan struct{}, bigTransfers)
 	crlQueue = make(chan struct{}, bigCRLQueue)
@@ -177,17 +184,49 @@ func acquireCRLMemory(ctx context.Context, size int) (func(), error) {
 	}
 }
 
-// acquireBigIO admits a transfer of size bytes (-1 if unknown); small ones
-// pass freely. The returned release may be called more than once.
-func acquireBigIO(ctx context.Context, size int64) (func(), error) {
+// admit bounds the requests that hold input or wait for an analysis: beyond
+// maxPending they are refused at once, before reading a body.
+func admit(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case pending <- struct{}{}:
+			defer func() { <-pending }()
+			next(w, r)
+		default:
+			http.Error(w, errBusy.Error(), http.StatusServiceUnavailable)
+		}
+	}
+}
+
+// localOnly serves only requests addressed to localhost, so a web page in the
+// administrator's browser cannot reach the admin listener by DNS rebinding.
+func localOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		switch strings.Trim(host, "[]") {
+		case "localhost", "127.0.0.1", "::1":
+		default:
+			http.Error(w, "admin is served on localhost only", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// acquireBig admits a transfer of size bytes (-1 if unknown) through sem;
+// small ones pass freely. The returned release may be called more than once.
+func acquireBig(ctx context.Context, sem chan struct{}, size int64) (func(), error) {
 	if size >= 0 && size <= bigTransferSize {
 		return func() {}, nil
 	}
 	wait, stop := context.WithTimeout(ctx, slotWait)
 	defer stop()
 	select {
-	case bigIO <- struct{}{}:
-		return sync.OnceFunc(func() { <-bigIO }), nil
+	case sem <- struct{}{}:
+		return sync.OnceFunc(func() { <-sem }), nil
 	case <-wait.Done():
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -242,18 +281,103 @@ func usableURLs(urls []string, max int) []string {
 	return out
 }
 
+// sizeError is input over its limit; n is -1 when only known to exceed it.
+type sizeError struct{ n, max int64 }
+
+func (e *sizeError) Error() string {
+	if e.n < 0 {
+		return fmt.Sprintf("too large: over %d bytes", e.max)
+	}
+	return fmt.Sprintf("too large: %d bytes, limit %d", e.n, e.max)
+}
+
+// statusError is an HTTP response other than 200 OK.
+type statusError struct{ code int }
+
+func (e *statusError) Error() string { return fmt.Sprintf("HTTP %d", e.code) }
+
+// recentFailure is a fetch refused because the same one failed within ttl.
+type recentFailure struct {
+	ttl time.Duration
+	err error
+}
+
+func (e *recentFailure) Error() string {
+	return fmt.Sprintf("failed within the last %s: %v", e.ttl, e.err)
+}
+func (e *recentFailure) Unwrap() error { return e.err }
+
+var errNotObject = errors.New("not a DER or PEM object")
+
 func readLimited(r io.Reader, contentLength, max int64) ([]byte, error) {
 	if contentLength > max {
-		return nil, fmt.Errorf("too large: %d bytes, limit %d", contentLength, max)
+		return nil, &sizeError{contentLength, max}
 	}
-	data, err := io.ReadAll(io.LimitReader(r, max+1))
-	if err != nil {
+	var buf bytes.Buffer
+	if contentLength > 0 {
+		buf.Grow(int(contentLength) + 1)
+	}
+	if _, err := buf.ReadFrom(io.LimitReader(r, max+1)); err != nil {
 		return nil, err
 	}
+	data := buf.Bytes()
 	if int64(len(data)) > max {
-		return nil, fmt.Errorf("too large: over %d bytes", max)
+		return nil, &sizeError{-1, max}
 	}
 	return data, nil
+}
+
+// publicError names a failed fetch for clients by its kind only: the text of
+// a network error can carry internal addresses or another service's banner.
+// The full error goes to the log.
+func publicError(err error) string {
+	var recent *recentFailure
+	var dnsErr *net.DNSError
+	var netErr net.Error
+	switch {
+	case errors.As(err, &recent):
+		return "failed within the last " + recent.ttl.String() + ": " + publicError(recent.err)
+	case errors.Is(err, ssrfguard.ErrBlocked):
+		return "address is not public"
+	case errors.As(err, &dnsErr):
+		return "name not resolved"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return "timeout"
+	case errors.Is(err, errUnreachable):
+		return "connection failed"
+	case errors.Is(err, errBudget), errors.Is(err, errNotObject), errors.As(err, new(*statusError)), errors.As(err, new(*sizeError)):
+		return err.Error()
+	default:
+		return "connection failed or invalid response"
+	}
+}
+
+// checkObjectStart peeks whether a body starts as PEM or as a DER SEQUENCE
+// of at most max bytes, so a download of anything else ends at once.
+func checkObjectStart(br *bufio.Reader, max int64) error {
+	head, _ := br.Peek(6)
+	if bytes.HasPrefix(head, []byte("-----")) {
+		return nil
+	}
+	if len(head) < 2 || head[0] != 0x30 {
+		return errNotObject
+	}
+	n, size := int64(head[1]), int64(2)
+	if n >= 0x80 {
+		k := int(n & 0x7f)
+		if k == 0 || k > 4 || len(head) < 2+k {
+			return errNotObject
+		}
+		n = 0
+		for _, b := range head[2 : 2+k] {
+			n = n<<8 | int64(b)
+		}
+		size += int64(k)
+	}
+	if size += n; size > max {
+		return &sizeError{size, max}
+	}
+	return nil
 }
 
 // fetchFlight shares one download per key between concurrent requests and
@@ -265,6 +389,7 @@ type fetchFlight struct {
 	calls   map[string]*fetchCall
 	failed  map[string]failure
 	failTTL time.Duration
+	swept   time.Time
 }
 
 type failure struct {
@@ -293,7 +418,7 @@ func (f *fetchFlight) do(ctx context.Context, kind fetchKind, key, endpoint stri
 		if fl, ok := f.failed[k]; ok {
 			if time.Now().Before(fl.until) {
 				f.mu.Unlock()
-				return nil, "", fmt.Errorf("failed within the last %s: %w", f.failTTL, fl.err)
+				return nil, "", &recentFailure{f.failTTL, fl.err}
 			}
 			delete(f.failed, k)
 		}
@@ -320,7 +445,8 @@ func (f *fetchFlight) do(ctx context.Context, kind fetchKind, key, endpoint stri
 			}
 			if c.err != nil && !abandoned && f.failTTL > 0 {
 				now := time.Now()
-				if len(f.failed) >= 4096 {
+				if len(f.failed) >= 4096 && now.Sub(f.swept) > 10*time.Second {
+					f.swept = now
 					for k, fl := range f.failed {
 						if now.After(fl.until) {
 							delete(f.failed, k)

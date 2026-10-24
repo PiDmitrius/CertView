@@ -265,6 +265,13 @@ func (ctx *Context) Close() error {
 	return nil
 }
 
+// CanSignCRL reports whether c may issue CRLs: a CA whose key usage, when
+// present, includes cRLSign.
+func (c *CertInfo) CanSignCRL() bool {
+	const noKeyUsage, crlSign = 0xFFFFFFFF, 0x0002
+	return c.IsCA && (c.KeyUsage == noKeyUsage || c.KeyUsage&crlSign != 0)
+}
+
 func (ctx *Context) ParseCertInfo(data []byte) (*CertInfo, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty certificate data")

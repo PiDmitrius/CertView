@@ -303,3 +303,46 @@ func TestArchiveIssuersOldestAndNewest(t *testing.T) {
 		}
 	}
 }
+
+func TestOCSPAndCRLDoNotAccumulate(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "certview.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now()
+	count := func(table string) (n int) {
+		if err := s.db.QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+
+	for i, der := range []string{"r1", "r2", "r3"} {
+		if err := s.SaveOCSP("AA", "http://ocsp.test", "good", []byte(der), now, now.Add(time.Duration(i+1)*time.Hour), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SaveOCSP("BB", "http://ocsp.test", "good", []byte("old"), now.Add(-2*time.Hour), now.Add(-time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveOCSP("CC", "http://ocsp.test", "good", []byte("c"), now, now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	if n := count("ocsp_responses"); n != 2 {
+		t.Fatalf("%d OCSP responses kept, want the latest for AA and CC", n)
+	}
+
+	if err := s.SaveCRL("CN=CA", "", []byte("crl1"), now.Add(-time.Hour), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveCRL("CN=CA", "http://crl.test/a", []byte("crl2"), now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveCRL("CN=CA", "http://crl.test/b", []byte("crl3"), now.Add(time.Minute), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if n := count("crls"); n != 2 {
+		t.Fatalf("%d CRLs kept, want the two a URL maps to", n)
+	}
+}

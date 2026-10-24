@@ -27,12 +27,21 @@ func newRespCache[T any](ttl time.Duration) *respCache[T] {
 	return c
 }
 
+// respCacheMax bounds the entries, so the memory responses hold: a full
+// cache computes new keys uncached until expired entries are dropped.
+const respCacheMax = 64
+
 // get returns the cached response for key, or computes and caches it; hit
 // reports a cached response.
 func (c *respCache[T]) get(ctx context.Context, key string, compute func() (*T, error)) (resp *T, hit bool, err error) {
 	c.mu.Lock()
 	e, ok := c.entries[key]
 	if !ok {
+		if len(c.entries) >= respCacheMax {
+			c.mu.Unlock()
+			resp, err = compute()
+			return resp, false, err
+		}
 		e = &respCacheEntry[T]{gate: make(chan struct{}, 1)}
 		c.entries[key] = e
 	}
