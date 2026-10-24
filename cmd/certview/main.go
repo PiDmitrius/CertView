@@ -182,11 +182,12 @@ func main() {
 	})
 
 	mount := func(mux *http.ServeMux, h *handler) {
-		mux.HandleFunc("POST /api/analyze", h.analyze)
-		mux.HandleFunc("GET /api/cert/{thumbprint}", h.analyzeByThumbprint)
+		mux.HandleFunc("POST /api/analyze", admit(h.analyze))
+		mux.HandleFunc("POST /api/link", admit(h.analyzeLink))
+		mux.HandleFunc("GET /api/cert/{thumbprint}", admit(h.analyzeByThumbprint))
 		mux.HandleFunc("GET /api/der/{sha256}", h.derBySHA256)
-		mux.HandleFunc("POST /api/site", h.analyzeSite)
-		mux.HandleFunc("GET /api/site/{hostport}", h.analyzeSiteByHostPort)
+		mux.HandleFunc("POST /api/site", admit(h.analyzeSite))
+		mux.HandleFunc("GET /api/site/{hostport}", admit(h.analyzeSiteByHostPort))
 		mux.HandleFunc("GET /api/config", h.config)
 		mux.Handle("/", rootHandler)
 	}
@@ -208,7 +209,7 @@ func main() {
 		admMux.HandleFunc("POST /api/untrust", adm.untrust)
 
 		log.Printf("admin listening on %s", *adminAddr)
-		log.Fatal(limits.ListenAndServe(*adminAddr, admMux))
+		log.Fatal(limits.ListenAndServe(*adminAddr, localOnly(admMux)))
 	} else {
 		select {}
 	}

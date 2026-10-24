@@ -7,6 +7,7 @@ package pki
 */
 import "C"
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"time"
@@ -168,6 +169,23 @@ type CRLInfo struct {
 	NextUpdate    time.Time
 	RevokedCount  int
 	HasIDP        bool
+	IsDelta       bool
+	idp           *idpScope // nil when HasIDP but malformed
+}
+
+// Covers reports whether cert missing from the CRL is shown unrevoked by it:
+// only by a CRL of cert's issuer; never by a delta CRL, which lists only
+// revocations since its base; by a CRL with issuingDistributionPoint only
+// within its scope.
+func (i *CRLInfo) Covers(cert *CertInfo) bool {
+	switch {
+	case !bytes.Equal(i.IssuerNameDER, cert.IssuerNameDER), i.IsDelta:
+		return false
+	case i.HasIDP:
+		return i.idp != nil && i.idp.covers(cert.CDPURLs, cert.IsCA)
+	default:
+		return true
+	}
 }
 
 // ErrCRLBadSignature is returned by CRL.Verify when CRL signature does not
@@ -245,6 +263,13 @@ func (ctx *Context) Close() error {
 		return rcError("mp_close", rc)
 	}
 	return nil
+}
+
+// CanSignCRL reports whether c may issue CRLs: a CA whose key usage, when
+// present, includes cRLSign.
+func (c *CertInfo) CanSignCRL() bool {
+	const noKeyUsage, crlSign = 0xFFFFFFFF, 0x0002
+	return c.IsCA && (c.KeyUsage == noKeyUsage || c.KeyUsage&crlSign != 0)
 }
 
 func (ctx *Context) ParseCertInfo(data []byte) (*CertInfo, error) {
@@ -490,6 +515,10 @@ func (ctx *Context) ParseCRL(data []byte) (*CRL, error) {
 	if C.mp_crl_has_idp(crl, &hasIDP) == C.MP_OK {
 		info.HasIDP = hasIDP == 1
 	}
+	var isDelta C.int32_t
+	if C.mp_crl_is_delta(crl, &isDelta) == C.MP_OK {
+		info.IsDelta = isDelta == 1
+	}
 
 	var der *C.uint8_t
 	var derlen C.size_t
@@ -498,7 +527,11 @@ func (ctx *Context) ParseCRL(data []byte) (*CRL, error) {
 		return nil, rcError("mp_crl_der", rc)
 	}
 
-	return &CRL{c: crl, Info: info, DER: C.GoBytes(unsafe.Pointer(der), C.int(derlen))}, nil
+	goDER := C.GoBytes(unsafe.Pointer(der), C.int(derlen))
+	if info.HasIDP {
+		info.idp, _ = parseIDP(goDER)
+	}
+	return &CRL{c: crl, Info: info, DER: goDER}, nil
 }
 
 // Close frees the CRL and returns the freed heap to the OS: a parsed large
@@ -605,8 +638,10 @@ func (ctx *Context) Verify(leafDER []byte, roots, intermediates [][]byte) (*Veri
 
 	result := &VerifyResult{RevocationStatus: "skipped"}
 
-	// Chain validity check (CRL flags off — caller does revocation manually)
-	C.mp_store_set_crl_check(store, 0)
+	// The caller checks revocation; a self-signed anchor's own signature is checked.
+	if rc := C.mp_store_set_flags(store, C.MP_VERIFY_CHECK_SS_SIG); rc != C.MP_OK {
+		return nil, rcError("mp_store_set_flags", rc)
+	}
 	var chain1 C.MP_CHAIN
 	rc = C.mp_verify(store, cert, &chain1)
 	if rc != C.MP_OK {

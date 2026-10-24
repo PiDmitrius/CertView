@@ -407,7 +407,7 @@ func (s *Store) FindFreshCRLByIssuer(issuer string) ([]byte, error) {
 }
 
 // SaveCRL stores the CRL once per content, maps url (if any) to it, and
-// drops expired CRLs.
+// drops expired CRLs and older CRLs of the issuer that no URL maps to.
 func (s *Store) SaveCRL(issuer, url string, der []byte, thisUpdate, nextUpdate time.Time) error {
 	for _, stmt := range []string{
 		"DELETE FROM crls WHERE next_update < ?",
@@ -426,10 +426,14 @@ func (s *Store) SaveCRL(issuer, url string, der []byte, thisUpdate, nextUpdate t
 	); err != nil {
 		return err
 	}
-	if url == "" {
-		return nil
+	if url != "" {
+		if _, err := s.db.Exec("INSERT OR REPLACE INTO crl_urls (url, sha256) VALUES (?, ?)", url, sha); err != nil {
+			return err
+		}
 	}
-	_, err := s.db.Exec("INSERT OR REPLACE INTO crl_urls (url, sha256) VALUES (?, ?)", url, sha)
+	_, err := s.db.Exec(
+		"DELETE FROM crls WHERE issuer = ? AND this_update < ? AND sha256 NOT IN (SELECT sha256 FROM crl_urls)",
+		issuer, thisUpdate.Unix())
 	return err
 }
 
@@ -586,9 +590,15 @@ func (s *Store) FindFreshOCSP(certThumbprint string) ([]byte, error) {
 	return der, err
 }
 
+// SaveOCSP keeps one response per certificate and drops expired ones.
 func (s *Store) SaveOCSP(certThumbprint, responderURL, status string, der []byte,
 	thisUpdate, nextUpdate, producedAt time.Time) error {
 
+	if _, err := s.db.Exec(
+		"DELETE FROM ocsp_responses WHERE cert_thumbprint = ? OR next_update < ?",
+		strings.ToUpper(certThumbprint), time.Now().Unix()); err != nil {
+		return err
+	}
 	var nextU *int64
 	if !nextUpdate.IsZero() {
 		v := nextUpdate.Unix()

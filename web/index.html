@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CertView</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1 L14 3 V8 Q14 12 8 15 Q2 12 2 8 V3 Z' fill='%230366d6'/%3E%3Cpath d='M5 8 L7 10 L11 6' stroke='%23fff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -14,7 +14,10 @@
   --border: #d0d7de;
   --text: #24292e;
   --text2: #6a737d;
-  --accent: #0366d6;
+  --accent: #012B6E;
+  --accent-mid: #3a5a8c;
+  --accent-tint: #dbe2ee;
+  --accent-soft: #eef1f6;
   --green: #1a7f37;
   --red: #d73a49;
   --yellow: #9a6700;
@@ -45,21 +48,31 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: var(--text2); }
 
 header {
+  max-width: 960px;
+  margin: 0 auto;
   padding: 24px 32px 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 
+header .logo { display: block; flex: none; }
+header .logo img { display: block; width: 52px; height: 52px; }
+
 header h1 a {
-  font-size: 18px;
-  font-weight: 600;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.15;
   color: var(--accent);
   text-decoration: none;
 }
-header h1 a:hover { opacity: 0.85; }
+header a:hover { opacity: 0.85; }
 
 header p {
   color: var(--text2);
   margin-top: 4px;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 main {
@@ -84,7 +97,7 @@ main {
 
 #drop-zone.hover {
   border-color: var(--accent);
-  background: #f0f6ff;
+  background: var(--accent-soft);
 }
 
 #drop-zone input[type="file"] {
@@ -189,7 +202,7 @@ main {
 }
 
 .chain-node:hover { border-color: var(--accent); }
-.chain-node.selected { border-color: var(--accent); background: #f0f6ff; }
+.chain-node.selected { border-color: var(--accent); background: var(--accent-soft); }
 .chain-node.selected .cn-meta { color: var(--accent); }
 .chain-node.selected .cn-san { color: var(--accent); }
 
@@ -230,8 +243,8 @@ main {
   transition: color 0.15s, background 0.15s;
 }
 
-.crl-inline:hover { color: var(--text); background: #f0f6ff; }
-.crl-inline.selected { color: var(--accent); background: #ddf4ff; }
+.crl-inline:hover { color: var(--text); background: var(--accent-soft); }
+.crl-inline.selected { color: var(--accent); background: var(--accent-tint); }
 .crl-inline .cn-tags { margin-bottom: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
 .crl-inline .crl-summary { font-size: 11px; }
 
@@ -338,12 +351,12 @@ main {
   font-weight: 600;
 }
 
-.tag.ca { background: #ddf4ff; color: #0969da; }
+.tag.ca { background: var(--accent-tint); color: var(--accent); }
 .tag.root { background: #dcffe4; color: #1a7f37; }
 .tag.leaf { background: #fff8c5; color: #9a6700; }
 .tag.cross { background: #ffe9f3; color: #bf3989; }
 .tag.eku { background: #f0e8ff; color: #6639ba; }
-.tag.algo { background: #ddf4ff; color: #0550ae; }
+.tag.algo { background: var(--accent-tint); color: var(--accent-mid); }
 .tag.bad { background: #ffebe9; color: var(--red); }
 .tag.unchecked { background: #eaeef2; color: var(--text2); }
 
@@ -366,7 +379,7 @@ main {
   text-decoration: none;
 }
 
-.cert-actions button:hover, .cert-actions a:hover { background: #f0f6ff; border-color: var(--accent); }
+.cert-actions button:hover, .cert-actions a:hover { background: var(--accent-soft); border-color: var(--accent); }
 
 .cert-actions button:hover, .cert-actions a:hover {
   border-color: var(--accent);
@@ -452,6 +465,16 @@ main {
 }
 
 #error-box.active { display: block; }
+
+#site-notice:not(:empty) {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  background: #fff8c5;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 #error-box .error-title { font-weight: 600; margin-bottom: 4px; }
 #error-box .error-message { color: var(--text); overflow-wrap: anywhere; }
 
@@ -459,8 +482,11 @@ main {
 </head>
 <body>
 <header>
-  <h1><a href="/">CertView</a></h1>
-  <p>Certificate chain analyzer</p>
+  <a class="logo" href="/"><img src="/logo.svg" alt=""></a>
+  <div>
+    <h1><a href="/">CertView</a></h1>
+    <p>Certificate chain analyzer</p>
+  </div>
 </header>
 <main>
   <div id="drop-zone" tabindex="0">
@@ -482,6 +508,7 @@ main {
   <div id="results">
     <div class="section" id="verify-section">
       <div class="site-tabs" id="site-tabs" style="display:none"></div>
+      <div id="site-notice"></div>
       <h2>Verification</h2>
       <div id="verify-result"></div>
     </div>
@@ -531,6 +558,7 @@ function showError(title, message) {
 function resetSiteState() {
   siteData = null;
   siteTabs.style.display = 'none';
+  document.getElementById('site-notice').textContent = '';
 }
 
 // Heuristic: decide whether textarea content is a URL/host or PEM/binary.
@@ -576,79 +604,113 @@ pemBtn.addEventListener('click', () => {
   }
 });
 
-async function sendFile(file) {
-  const buf = await file.arrayBuffer();
-  sendBytes(new Uint8Array(buf));
+function sendFile(file) {
+  return runLoad(() => sendFile(file), async signal =>
+    analyzeBytes(signal, new Uint8Array(await file.arrayBuffer())));
 }
 
-async function sendBytes(bytes) {
-  window.__rerun = () => sendBytes(bytes);
+// Only the latest load shows: starting one aborts the one before, whose
+// response and errors are then dropped.
+let currentLoad = null;
+async function runLoad(rerun, work) {
+  window.__rerun = rerun;
+  if (currentLoad) currentLoad.abort();
+  const load = currentLoad = new AbortController();
   loading.classList.add('active');
   results.classList.remove('active');
   clearError();
-  clearSiteUI();
-
   try {
-    const resp = await fetch('/api/analyze', {
+    await work(load.signal);
+  } catch (e) {
+    if (!load.signal.aborted) showError('Request failed', e.message);
+  } finally {
+    if (currentLoad === load) loading.classList.remove('active');
+  }
+}
+
+// Fetches for a load: the response with its JSON, or its text on an error
+// status; null once a newer load started.
+async function loadFetch(signal, url, opts) {
+  const resp = await fetch(url, {...opts, signal});
+  const body = resp.ok ? await resp.json() : (await resp.text()).trim();
+  return signal.aborted ? null : {resp, body};
+}
+
+function sendBytes(bytes) {
+  return runLoad(() => sendBytes(bytes), signal => analyzeBytes(signal, bytes));
+}
+
+async function analyzeBytes(signal, bytes) {
+  if (signal.aborted) return;
+  clearSiteUI();
+  const r = await loadFetch(signal, '/api/analyze', {method: 'POST', body: bytes});
+  if (!r) return;
+  if (!r.resp.ok) return showError('Request failed', r.body);
+  render(r.body);
+  updateHashFromData(r.body);
+}
+
+function loadByThumbprint(tp) {
+  return runLoad(() => loadByThumbprint(tp), async signal => {
+    clearSiteUI();
+    const r = await loadFetch(signal, '/api/cert/' + encodeURIComponent(tp));
+    if (!r) return;
+    if (!r.resp.ok) return showError('Load failed', r.resp.status === 404 ? 'not found: ' + tp : r.body);
+    render(r.body);
+  });
+}
+
+// #cert=<base64url DER>[&cert=…]: the certificates of a link, leaf first
+function linkCerts(hash) {
+  if (!hash.startsWith('#cert=')) return null;
+  return new URLSearchParams(hash.slice(1)).getAll('cert');
+}
+
+function loadLink(certs) {
+  return runLoad(() => loadLink(certs), async signal => {
+    resetSiteState();
+    const r = await loadFetch(signal, '/api/link', {
       method: 'POST',
-      body: bytes,
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({certs}),
     });
-    const data = await resp.json();
-    render(data);
-    updateHashFromData(data);
-  } catch (e) {
-    showError('Request failed', e.message);
-  } finally {
-    loading.classList.remove('active');
-  }
+    if (!r) return;
+    if (r.resp.status === 400) return showError('Bad link', r.body.replace(/^Bad link: /, ''));
+    if (!r.resp.ok) return showError('Load failed', r.body);
+    render(r.body);
+  });
 }
 
-async function loadByThumbprint(tp) {
-  window.__rerun = () => loadByThumbprint(tp);
-  loading.classList.add('active');
-  results.classList.remove('active');
-  clearError();
-  clearSiteUI();
-  try {
-    const resp = await fetch('/api/cert/' + encodeURIComponent(tp));
-    if (!resp.ok) throw new Error('not found: ' + tp);
-    const data = await resp.json();
-    render(data);
-  } catch (e) {
-    showError('Load failed', e.message);
-  } finally {
-    loading.classList.remove('active');
+// Loads what the address names: a site, with the thumbprint of the leaf
+// whose tab to show; else a link's certificates or a stored thumbprint.
+function route() {
+  const path = window.location.pathname;
+  const hash = window.location.hash;
+  if (pathLooksLikeHost(path)) {
+    loadSiteByPath(path.slice(1).replace(/\/$/, ''), hash.slice(1) || null);
+    return;
   }
+  const certs = linkCerts(hash);
+  if (certs) loadLink(certs);
+  else if (hash.length > 1) loadByThumbprint(hash.slice(1));
 }
 
-async function fetchSite(url) {
-  window.__rerun = () => fetchSite(url);
-  loading.classList.add('active');
-  results.classList.remove('active');
-  clearError();
-  resetSiteState();
-  activeTabIdx = 0;
-  try {
-    const resp = await fetch('/api/site', {
+function fetchSite(url) {
+  return runLoad(() => fetchSite(url), async signal => {
+    resetSiteState();
+    activeTabIdx = 0;
+    const r = await loadFetch(signal, '/api/site', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({url}),
     });
-    if (!resp.ok) {
-      const t = await resp.text();
-      showError('Site fetch failed', t.trim());
-      return;
-    }
-    const data = await resp.json();
-    siteData = data;
-    pemInput.value = canonicalSiteString(data.host, data.port);
-    renderSite(data);
-    updateSitePath(data.host, data.port);
-  } catch (e) {
-    showError('Request failed', e.message);
-  } finally {
-    loading.classList.remove('active');
-  }
+    if (!r) return;
+    if (!r.resp.ok) return showError('Site fetch failed', r.body);
+    siteData = r.body;
+    pemInput.value = canonicalSiteString(siteData.host, siteData.port);
+    renderSite(siteData);
+    updateSitePath(siteData.host, siteData.port);
+  });
 }
 
 function canonicalSiteString(host, port) {
@@ -658,35 +720,42 @@ function canonicalSiteString(host, port) {
   return hp;
 }
 
-async function loadSiteByPath(hostport, targetThumb) {
-  window.__rerun = () => loadSiteByPath(hostport, targetThumb);
-  loading.classList.add('active');
-  results.classList.remove('active');
-  clearError();
-  resetSiteState();
-  activeTabIdx = 0;
-  pemInput.value = hostport;
-  try {
-    const resp = await fetch('/api/site/' + encodeURIComponent(hostport));
-    if (!resp.ok) {
-      const t = await resp.text();
-      showError('Site load failed', t.trim());
-      return;
-    }
-    const data = await resp.json();
-    siteData = data;
+function loadSiteByPath(hostport, targetThumb) {
+  return runLoad(() => loadSiteByPath(hostport, targetThumb), async signal => {
+    resetSiteState();
+    activeTabIdx = 0;
+    pemInput.value = hostport;
+    const r = await loadFetch(signal, '/api/site/' + encodeURIComponent(hostport));
+    if (!r) return;
+    if (!r.resp.ok) return showError('Site load failed', r.body);
+    siteData = r.body;
+    // The link's certificate is gone only when every TLS client got a chain without it
+    let missing = false;
     if (targetThumb) {
-      const idx = data.results.findIndex(r =>
-        r.ok && r.analysis && r.analysis.chain[0] &&
-        r.analysis.chain[0].thumbprint_sha1 === targetThumb);
+      const idx = siteData.results.findIndex(x =>
+        x.ok && x.analysis && x.analysis.chain[0] &&
+        x.analysis.chain[0].thumbprint_sha1 === targetThumb);
       if (idx >= 0) activeTabIdx = idx;
+      else missing = siteData.results.every(x => x.ok && x.analysis);
     }
-    renderSite(data);
-  } catch (e) {
-    showError('Request failed', e.message);
-  } finally {
-    loading.classList.remove('active');
-  }
+    renderSite(siteData);
+    if (missing) await noteMissingThumb(signal, hostport, targetThumb);
+  });
+}
+
+// The certificate a site link names is not served by the site now: say so,
+// link it from the archive when stored, and keep only the site in the address.
+async function noteMissingThumb(signal, hostport, tp) {
+  window.history.replaceState(null, '', '/' + hostport);
+  const short = tp.length > 16 ? tp.slice(0, 16) + '…' : tp;
+  const notice = document.getElementById('site-notice');
+  notice.textContent = `Certificate ${short} from the link is not served by the site now; showing the current one.`;
+  const resp = await fetch('/api/cert/' + encodeURIComponent(tp), {method: 'HEAD', signal}).catch(() => null);
+  if (!resp || !resp.ok || signal.aborted) return;
+  const a = document.createElement('a');
+  a.href = '/#' + tp;
+  a.textContent = 'Open it from the archive';
+  notice.append(' ', a);
 }
 
 function renderSite(data) {
@@ -828,8 +897,7 @@ function derActions(obj, name, sourceURL) {
 
 window.addEventListener('hashchange', () => {
   if (window.__suppressHash) return;
-  const tp = window.location.hash.slice(1);
-  if (tp) loadByThumbprint(tp);
+  route();
 });
 
 window.addEventListener('DOMContentLoaded', async () => {
@@ -841,16 +909,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   } catch (e) {}
 
-  const path = window.location.pathname;
-  if (pathLooksLikeHost(path)) {
-    const hp = path.slice(1).replace(/\/$/, '');
-    const wantThumb = window.location.hash.slice(1) || null;
-    loadSiteByPath(hp, wantThumb);
-    return;
-  }
-
-  const tp = window.location.hash.slice(1);
-  if (tp) loadByThumbprint(tp);
+  route();
 });
 
 function render(data) {
@@ -865,7 +924,7 @@ function render(data) {
   const verifyEl = document.getElementById('verify-result');
   let cls = 'error';
   if (vr.status === 'ok') cls = 'ok';
-  else if (vr.status === 'no_crl' || vr.status === 'no_chain') cls = 'warn';
+  else if (vr.status === 'warn' || vr.status === 'no_crl' || vr.status === 'no_chain') cls = 'warn';
   let label = vr.status === 'ok' ? 'Valid' : (vr.message || vr.status);
   let html = `<span class="verify-badge ${cls}">${esc(label)}</span>`;
   const cryptoBadge = chainCryptoBadge(chain);
@@ -878,7 +937,7 @@ function render(data) {
     html += ` <span class="verify-badge warn" title="Chain built but root is not in trust store">Untrusted root</span>`;
   }
   if (vr.revocation_status === 'checked') {
-    html += ` <span class="verify-badge ok" title="All CRLs fetched, no certs revoked">Revocation checked</span>`;
+    html += ` <span class="verify-badge ok" title="Revocation determined for every certificate: none revoked">Revocation checked</span>`;
   } else if (vr.revocation_status === 'incomplete') {
     html += ` <span class="verify-badge warn" title="${esc(vr.revocation_msg||'')}">Revocation unknown</span>`;
   } else if (vr.revocation_status === 'na') {
@@ -893,7 +952,7 @@ function render(data) {
     const node = document.createElement('div');
     node.className = 'chain-node' + (i === 0 ? ' selected' : '');
     let tags = '';
-    if (i === 0) tags += '<span class="tag leaf">LEAF</span> ';
+    if (!cert.is_ca) tags += '<span class="tag leaf">LEAF</span> ';
     if (cert.is_ca) tags += '<span class="tag ca">CA</span> ';
     if (cert.is_self_signed) tags += '<span class="tag root">ROOT</span> ';
     if (cert.is_cross_signed) tags += '<span class="tag cross" title="Cross-signed: signed by another CA with the same name">CROSS</span> ';
@@ -927,8 +986,10 @@ function render(data) {
         crlNode.className = 'crl-inline';
         const rev = crl.cert_revoked ? ' <span class="crl-revoked">REVOKED</span>' : '';
         const sigTag = crlSigTag(crl);
-        const scopeTag = crl.has_idp
-          ? ' <span class="tag unchecked" title="issuingDistributionPoint present — scope not analyzed, revocation may be incomplete">scope partial</span>'
+        const scopeTag = crl.is_delta
+          ? ' <span class="tag unchecked" title="Delta CRL: lists only revocations since its base CRL, so a certificate missing from it is not shown unrevoked">delta</span>'
+          : crl.has_idp
+          ? ' <span class="tag unchecked" title="issuingDistributionPoint present: the CRL covers only the certificates in its scope">scope partial</span>'
           : '';
         let fname = (crl.urls[0]||'crl').split('/').pop().replace(/[^a-zA-Z0-9_.-]/g,'_');
         if (!fname.endsWith('.crl')) fname += '.crl';
@@ -948,12 +1009,12 @@ function render(data) {
         ocspNode.className = 'crl-inline';
         const cap = s => s ? s[0].toUpperCase() + s.slice(1) : s;
         let statusTag = '';
-        if (ocsp.status === 'revoked') statusTag = ' <span class="crl-revoked">Revoked</span>';
+        if (ocsp.status === 'revoked') statusTag = ' <span class="crl-revoked">Revoked</span>' + revokedDetail(ocsp);
         else if (ocsp.status === 'good') statusTag = ''; // good — not noisy
         else statusTag = ' <span style="color:var(--yellow)">' + esc(cap(ocsp.status)) + '</span>';
         const verTag = ocsp.verified
           ? ''
-          : ' <span class="tag bad" title="OCSP response signature not verified against issuer — response was ignored for revocation decision">sig NOT verified</span>';
+          : ` <span class="tag bad" title="${esc(ocsp.verify_msg||'')} — response was not used for the revocation decision">NOT verified</span>`;
         const dates = ocsp.next_update
           ? `${esc(ocsp.this_update).substring(0,10)} — ${esc(ocsp.next_update).substring(0,10)}${fmtRemaining(ocsp.next_update)}`
           : `${esc(ocsp.this_update).substring(0,10)} (no nextUpdate)`;
@@ -1066,7 +1127,7 @@ function selectCert(e, chain, idx, mode, crlIdx) {
     <tr><td colspan="2" class="detail-label">Revocation</td></tr>
     <tr><td>${esc(cert.revocation.via)}</td><td>${
       cert.revocation.status === 'revoked'
-        ? '<span class="crl-revoked">REVOKED</span>'
+        ? '<span class="crl-revoked">REVOKED</span>' + revokedDetail(cert.revocation)
         : '<span style="color:var(--green)">Not revoked</span>'
     }</td></tr>
     ` : ''}
@@ -1082,12 +1143,17 @@ function selectCert(e, chain, idx, mode, crlIdx) {
   });
 }
 
+// " · <date> · <reason>" of a revocation that carries them
+function revokedDetail(r) {
+  return [r.revoked_at, r.revoke_reason].filter(Boolean).map(v => ' · ' + esc(v)).join('');
+}
+
 function selectOCSP(cert, oi) {
   const ocsp = cert.issued_ocsps[oi];
   const el = document.getElementById('cert-details');
   const verBadge = ocsp.verified
     ? ''
-    : ' <span class="verify-badge error" title="OCSP response signature did not verify against issuer — response was NOT used for revocation decision">Signature NOT verified</span>';
+    : ` <span class="verify-badge error" title="Response was NOT used for the revocation decision">${esc(ocsp.verify_msg || 'NOT verified')}</span>`;
   let statusBadge = '';
   if (ocsp.status === 'good') statusBadge = '<span class="verify-badge ok">Good</span>';
   else if (ocsp.status === 'revoked') statusBadge = '<span class="verify-badge error">Revoked</span>';
@@ -1098,6 +1164,8 @@ function selectOCSP(cert, oi) {
     <tr><td>Status</td><td>${statusBadge} ${verBadge}</td></tr>
     <tr><td>For Cert</td><td>${fmtDN(ocsp.cert_subject)}</td></tr>
     <tr><td>Cert Serial</td><td>${esc(ocsp.cert_serial)}</td></tr>
+    ${ocsp.revoked_at ? `<tr><td>Revoked At</td><td>${esc(ocsp.revoked_at)}</td></tr>` : ''}
+    ${ocsp.revoke_reason ? `<tr><td>Revocation Reason</td><td>${esc(ocsp.revoke_reason)}</td></tr>` : ''}
 
     <tr><td colspan="2" class="detail-label">Validity</td></tr>
     ${ocsp.this_update ? `<tr><td>This Update</td><td>${esc(ocsp.this_update)}</td></tr>` : ''}
@@ -1134,8 +1202,10 @@ function selectCRL(cert, crlIdx) {
   const akiRow = crl.aki
     ? `<tr><td>AKI</td><td>${esc(crl.aki)}</td></tr>`
     : '';
-  const scopeRow = crl.has_idp
-    ? `<tr><td>Scope</td><td><span style="color:var(--text2)">partial</span> · issuingDistributionPoint present, not analyzed (revocation may be incomplete)</td></tr>`
+  const scopeRow = crl.is_delta
+    ? `<tr><td>Scope</td><td><span style="color:var(--text2)">delta</span> · lists only revocations since its base CRL; a certificate missing from it is not shown unrevoked</td></tr>`
+    : crl.has_idp
+    ? `<tr><td>Scope</td><td><span style="color:var(--text2)">partial</span> · issuingDistributionPoint present; covers only the certificates in its scope</td></tr>`
     : '';
 
   el.innerHTML = `<table>
@@ -1181,7 +1251,8 @@ function jsesc(s) {
   return String(s)
     .replace(/\\/g, '\\\\')
     .replace(/'/g, "\\'")
-    .replace(/"/g, '\\"')
+    .replace(/"/g, '\\x22')
+    .replace(/&/g, '\\x26')
     .replace(/</g, '\\x3c')
     .replace(/>/g, '\\x3e')
     .replace(/\r/g, '\\r')

@@ -104,7 +104,7 @@ func (h *handler) respondSite(w http.ResponseWriter, r *http.Request, host strin
 		return
 	}
 	if err := ssrfguard.Check(r.Context(), host); err != nil {
-		http.Error(w, "blocked: "+err.Error(), http.StatusForbidden)
+		http.Error(w, "blocked: "+publicError(err), http.StatusForbidden)
 		return
 	}
 
@@ -187,7 +187,7 @@ func (h *handler) doAnalyzeSite(ctx context.Context, host string, port int, sni 
 			bag = append(bag, bagCert{info, "tls"})
 		}
 
-		analysis, err := h.analyzeData(ctx, rl, ders[0], bag)
+		analysis, err := h.analyzeData(ctx, rl, ders[0], bag, false)
 		if err != nil {
 			return nil, err
 		}

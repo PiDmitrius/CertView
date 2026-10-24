@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha1"
-	"crypto/sha256"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/base64"
@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -96,9 +97,12 @@ type ocspJSON struct {
 	URL         string `json:"url"`
 	Status      string `json:"status"`
 	Verified    bool   `json:"verified"`
+	VerifyMsg   string `json:"verify_msg,omitempty"`
 	ThisUpdate  string `json:"this_update,omitempty"`
 	NextUpdate  string `json:"next_update,omitempty"`
 	ProducedAt  string `json:"produced_at,omitempty"`
+	RevokedAt   string `json:"revoked_at,omitempty"`
+	Reason      string `json:"revoke_reason,omitempty"`
 	CertSubject string `json:"cert_subject"`
 	CertSerial  string `json:"cert_serial"`
 	Source      string `json:"source,omitempty"`
@@ -117,13 +121,16 @@ type crlJSON struct {
 	SignatureStatus string   `json:"signature_status,omitempty"` // "verified" | "bad" | "unchecked"
 	SignatureMsg    string   `json:"signature_msg,omitempty"`
 	HasIDP          bool     `json:"has_idp,omitempty"`
+	IsDelta         bool     `json:"is_delta,omitempty"`
 	derJSON
 	Errors []string `json:"errors,omitempty"`
 }
 
 type revJSON struct {
-	Status string `json:"status"`
-	Via    string `json:"via"`
+	Status    string `json:"status"`
+	Via       string `json:"via"`
+	RevokedAt string `json:"revoked_at,omitempty"`
+	Reason    string `json:"revoke_reason,omitempty"`
 }
 
 type verifyJSON struct {
@@ -179,8 +186,6 @@ func decodeKeyUsage(ku uint32) []string {
 }
 
 func (h *handler) certToJSON(c *pki.CertInfo, source string) certJSON {
-	s1 := sha1.Sum(c.DER)
-	s256 := sha256.Sum256(c.DER)
 	// Cross-signed: subject == issuer at byte level, but not actually self-signed.
 	// This means another CA with the same name (typically same identity, different
 	// key) signed this cert — common during CA key rotation.
@@ -209,8 +214,8 @@ func (h *handler) certToJSON(c *pki.CertInfo, source string) certJSON {
 		AIAURLs:            c.AIAURLs,
 		OCSPURLs:           c.OCSPURLs,
 		CDPURLs:            c.CDPURLs,
-		ThumbprintSHA1:     strings.ToUpper(hex.EncodeToString(s1[:])),
-		ThumbprintSHA256:   strings.ToUpper(hex.EncodeToString(s256[:])),
+		ThumbprintSHA1:     sha1Hex(c.DER),
+		ThumbprintSHA256:   store.SHA256Hex(c.DER),
 		derJSON:            h.derRef(c.DER),
 		Stored:             h.store.HasDER(store.SHA256Hex(c.DER)),
 		Source:             source,
@@ -268,7 +273,7 @@ func nvl(s, fallback string) string {
 }
 
 func (h *handler) analyze(w http.ResponseWriter, r *http.Request) {
-	releaseIO, err := acquireBigIO(r.Context(), r.ContentLength)
+	releaseIO, err := acquireBig(r.Context(), bigIO, r.ContentLength)
 	if err != nil {
 		writeAnalysisError(w, err)
 		return
@@ -308,13 +313,14 @@ func (h *handler) doAnalyze(ctx context.Context, data []byte) (*analyzeResponse,
 		return nil, err
 	}
 	defer release()
-	return h.analyzeData(ctx, rl, data, nil)
+	return h.analyzeData(ctx, rl, data, nil, false)
 }
 
 // analyzeData runs one analysis within a context from guardAnalysis. bag
 // holds certificates this analysis may use as issuers beyond the trusted
-// pool, such as the chain a site presented.
-func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag []bagCert) (*analyzeResponse, error) {
+// pool, such as the chain a site presented. With link, data and bag come from
+// a link and none of them is stored.
+func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag []bagCert, link bool) (*analyzeResponse, error) {
 	start := time.Now()
 	resp := &analyzeResponse{}
 
@@ -330,6 +336,12 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		return nil, err
 	}
 
+	// Bound the input before parsing: a certificate is at most CertSize as
+	// DER, and its PEM form is under twice that.
+	if len(data) > 2*limits.CertSize {
+		resp.Verify = verifyJSON{Status: "error", Message: fmt.Sprintf("Input too large for a certificate: %d bytes", len(data))}
+		return resp, nil
+	}
 	leaf, err := h.ctx.ParseCertInfo(data)
 	if err != nil {
 		rl.f("PARSE FAILED: %v", err)
@@ -343,8 +355,16 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		return resp, nil
 	}
 
-	// Save all parsed certs — needed for shareable links via thumbprint
-	if err := h.store.SaveCert(
+	// Uploads are stored for shareable links via thumbprint; a link is its own.
+	leafSource := "upload"
+	transient := map[string]bool{}
+	if link {
+		leafSource = sourceLink
+		transient[string(leaf.DER)] = true
+		for _, c := range bag {
+			transient[string(c.info.DER)] = true
+		}
+	} else if err := h.store.SaveCert(
 		leaf.Subject, leaf.Issuer, leaf.Serial,
 		leaf.SKI, leaf.AKI, leaf.SubjectNameDER,
 		leaf.DER, leaf.IsCA, leaf.IsSelfSigned, "",
@@ -357,7 +377,7 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		source string
 	}
 
-	chain := []chainEntry{{info: leaf, source: "upload"}}
+	chain := []chainEntry{{info: leaf, source: leafSource}}
 	aiaBag := bag
 	seen := map[string]bool{store.SHA256Hex(leaf.DER): true}
 
@@ -384,18 +404,24 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		logCert(rl, fmt.Sprintf("chain[%d]:", depth), info)
 		current = info
 	}
-	if len(chain) >= maxChainDepth {
+	if len(chain) >= maxChainDepth && !current.IsSelfSigned {
 		rl.f("chain: DEPTH LIMIT reached (%d)", maxChainDepth)
 		resp.Warnings = append(resp.Warnings, "Chain depth limit reached")
 	}
 
 	rl.f("chain: %d certs total", len(chain))
+	// The archive keeps the chain and up to maxChainDepth certificates a site
+	// presented; other AIA certificates serve only this analysis.
 	for _, entry := range chain[1:] {
-		h.archive(rl, entry.info, entry.source)
+		if !transient[string(entry.info.DER)] {
+			h.archive(rl, entry.info, entry.source)
+		}
 	}
-	for _, c := range aiaBag {
-		if c.source != "archive" {
+	siteCerts := 0
+	for _, c := range bag {
+		if c.source == "tls" && siteCerts < maxChainDepth {
 			h.archive(rl, c.info, c.source)
+			siteCerts++
 		}
 	}
 	for _, entry := range chain {
@@ -460,11 +486,21 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 	}
 
 	type revResult struct {
-		status  string
-		revoked bool
-		via     string // "CRL" | "OCSP"
+		status    string
+		revoked   bool
+		via       string // "CRL" | "OCSP"
+		revokedAt string
+		reason    string
 	}
 	certRevocations := make([]revResult, len(chain))
+	// Why the revocation of a certificate is not determined: the one source
+	// of its revocation message and warnings.
+	undetermined := make([][]string, len(chain))
+	undecided := func(i int, reason string) {
+		if !slices.Contains(undetermined[i], reason) {
+			undetermined[i] = append(undetermined[i], reason)
+		}
+	}
 	issuerCRLs := make(map[int][]crlJSON)
 	issuerOCSPs := make(map[int][]ocspJSON)
 
@@ -514,7 +550,8 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			return nil
 		}
 
-		processCRL := func(crl *pki.CRL, source string, url string) {
+		// processCRL records a CRL and reports whether it was authoritative.
+		processCRL := func(crl *pki.CRL, source string, url string) bool {
 			crlInfo := crl.Info
 			sigStatus, sigMsg := "unchecked", ""
 			var sigWarn string
@@ -522,6 +559,9 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			crlIssuer := findCRLIssuer(crlInfo)
 			if crlIssuer == nil {
 				sigMsg = "issuer CA not in chain — signature not verified"
+				sigWarn = fmt.Sprintf("CRL %q: %s", crlInfo.Issuer, sigMsg)
+			} else if !crlIssuer.CanSignCRL() {
+				sigMsg = "issuer certificate may not sign CRLs"
 				sigWarn = fmt.Sprintf("CRL %q: %s", crlInfo.Issuer, sigMsg)
 			} else if err := crl.Verify(h.ctx, crlIssuer.DER); err != nil {
 				if errors.Is(err, pki.ErrCRLBadSignature) {
@@ -548,12 +588,7 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			}
 
 			if sigWarn != "" {
-				resp.Warnings = append(resp.Warnings, sigWarn)
-			}
-			if crlInfo.HasIDP {
-				resp.Warnings = append(resp.Warnings,
-					fmt.Sprintf("CRL %q has issuingDistributionPoint — scope not analyzed, revocation decision may be incomplete",
-						crlInfo.Issuer))
+				undecided(i, sigWarn)
 			}
 
 			// Only trust the revocation decision if signature verified AND CRL is fresh.
@@ -570,18 +605,23 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 				}
 			}
 
+			// A CRL that does not cover the certificate may show it revoked, never unrevoked.
 			if authoritative && !crlChecked {
-				status := "not_revoked"
-				if revoked {
-					status = "revoked"
+				switch {
+				case revoked:
+					certRevocations[i] = revResult{status: "revoked", revoked: true, via: "CRL"}
+					crlChecked = true
+				case !crlInfo.Covers(entry.info):
+					undecided(i, crlScopeNote(crlInfo, entry.info))
+				default:
+					certRevocations[i] = revResult{status: "not_revoked", via: "CRL"}
+					crlChecked = true
 				}
-				certRevocations[i] = revResult{status: status, revoked: revoked, via: "CRL"}
-				crlChecked = true
 			}
 
 			// Fetched CRLs are persisted when their issuer verifies to a trusted root.
 			if authoritative && source == "fetched" {
-				if _, ok := h.trustedPath(crlIssuer.DER, roots, intermediates); !ok {
+				if _, ok := h.trustedPath(crlIssuer.DER, roots, intermediates, transient); !ok {
 					rl.f("crl[%d]: not saved, issuer has no trusted anchor: %s", i, url)
 				} else if err := h.store.SaveCRL(crlInfo.Issuer, url, crl.DER, crlInfo.ThisUpdate, crlInfo.NextUpdate); err != nil {
 					rl.f("crl[%d]: store.SaveCRL: %v", i, err)
@@ -620,20 +660,24 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 					CertRevoked:  revoked, Source: source,
 					SignatureStatus: sigStatus, SignatureMsg: sigMsg,
 					HasIDP:  crlInfo.HasIDP,
+					IsDelta: crlInfo.IsDelta,
 					derJSON: h.derRef(crl.DER),
 				})
 			}
+			return authoritative
 		}
 
 		// CDP URLs are mirrors: the first authoritative CRL decides, cached copies first.
+		// A cached authoritative CRL that does not decide is not fetched again.
 		var fetchErrors []string
 		cdpURLs := usableURLs(entry.info.CDPURLs, maxCDPURLs)
+		cachedOK := map[string]bool{}
 		for _, url := range cdpURLs {
 			if crlChecked || ctx.Err() != nil {
 				break
 			}
 			if crl, closeCRL := h.cachedCRL(ctx, rl, url); crl != nil {
-				processCRL(crl, "cache", url)
+				cachedOK[url] = processCRL(crl, "cache", url)
 				closeCRL()
 			}
 		}
@@ -641,10 +685,14 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			if crlChecked || ctx.Err() != nil {
 				break
 			}
+			if cachedOK[url] {
+				continue
+			}
 			crl, closeCRL, err := h.fetchCRL(ctx, rl, url)
 			if err != nil {
 				rl.f("crl[%d]: FAILED url=%s err=%v", i, url, err)
-				fetchErrors = append(fetchErrors, fmt.Sprintf("%s: %v", url, err))
+				fetchErrors = append(fetchErrors, url+": "+publicError(err))
+				undecided(i, "CRL "+url+": "+publicError(err))
 				continue
 			}
 			processCRL(crl, "fetched", url)
@@ -670,28 +718,42 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			}
 		}
 
-		// OCSP fallback: if CRL didn't determine status and cert has OCSP URL
+		// OCSP fallback: if CRL didn't determine status and cert has OCSP URL.
+		// Only a verified good status shows it unrevoked; others are displayed.
 		if !crlChecked && len(entry.info.OCSPURLs) > 0 && issuerIdx >= 0 {
-			ocspRes, source, url := h.resolveOCSP(ctx, rl, i, entry.info, chain[issuerIdx].info)
-			if ocspRes != nil {
-				ocspStatus := "not_revoked"
-				ocspRevoked := false
-				if ocspRes.Status == "revoked" {
-					ocspStatus = "revoked"
-					ocspRevoked = true
+			ocspRes, source, url, failure := h.resolveOCSP(ctx, rl, i, entry.info, chain[issuerIdx].info)
+			if failure != "" {
+				undecided(i, failure)
+			}
+			// Fetched responses are kept when their issuer verifies to a trusted root.
+			if ocspRes != nil && source == "fetched" && ocspRes.Verified && !ocspRes.NextUpdate.IsZero() {
+				issuer := chain[issuerIdx].info
+				if _, ok := h.trustedPath(issuer.DER, roots, intermediates, transient); !ok {
+					rl.f("ocsp[%d]: not saved, issuer has no trusted anchor", i)
+				} else if err := h.store.SaveOCSP(sha1Hex(entry.info.DER), url, ocspRes.Status, ocspRes.DER,
+					ocspRes.ThisUpdate, ocspRes.NextUpdate, ocspRes.ProducedAt); err != nil {
+					rl.f("ocsp[%d]: store save: %v", i, err)
 				}
-
-				// OCSP response is authoritative only if signature verified against
-				// issuer (or a delegated OCSP signer chained to issuer).
-				// Unverified responses are still displayed in UI but do not count.
-				if ocspRes.Verified {
-					certRevocations[i] = revResult{status: ocspStatus, revoked: ocspRevoked, via: "OCSP"}
+			}
+			if ocspRes != nil {
+				note := ""
+				switch {
+				case !ocspRes.Verified:
+					note = ocspUnverifiedNote
+				case ocspRes.Status == "revoked":
+					certRevocations[i] = revResult{status: "revoked", revoked: true, via: "OCSP",
+						revokedAt: ocspRevokedAt(ocspRes), reason: revokeReasonName(ocspRes.RevokeReason)}
+				case ocspRes.Status == "good":
+					certRevocations[i] = revResult{status: "not_revoked", via: "OCSP"}
+				default:
+					note = "OCSP status is " + ocspRes.Status
+				}
+				if note != "" {
+					rl.f("ocsp[%d]: not counted: %s", i, note)
+					undecided(i, note)
+				} else {
 					crlChecked = true
 					fetchErrors = nil
-				} else {
-					rl.f("ocsp[%d]: signature NOT verified — response ignored as authoritative", i)
-					resp.Warnings = append(resp.Warnings,
-						"OCSP response for "+entry.info.Subject+" failed signature verification — not trusted")
 				}
 
 				oj := ocspJSON{
@@ -703,6 +765,9 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 					Source:      source,
 					derJSON:     h.derRef(ocspRes.DER),
 				}
+				if !ocspRes.Verified {
+					oj.VerifyMsg = note
+				}
 				if !ocspRes.ThisUpdate.IsZero() {
 					oj.ThisUpdate = ocspRes.ThisUpdate.Format(time.RFC3339)
 				}
@@ -711,6 +776,10 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 				}
 				if !ocspRes.ProducedAt.IsZero() {
 					oj.ProducedAt = ocspRes.ProducedAt.Format(time.RFC3339)
+				}
+				if ocspRes.Status == "revoked" {
+					oj.RevokedAt = ocspRevokedAt(ocspRes)
+					oj.Reason = revokeReasonName(ocspRes.RevokeReason)
 				}
 				issuerOCSPs[issuerIdx] = append(issuerOCSPs[issuerIdx], oj)
 			}
@@ -762,7 +831,14 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 				anyRevoked = true
 			}
 			if certRevocations[i].status == "" {
-				notChecked = append(notChecked, entry.info.Subject)
+				name := entry.info.Subject
+				if len(undetermined[i]) > 0 {
+					name += " (" + strings.Join(undetermined[i], ", ") + ")"
+				}
+				notChecked = append(notChecked, name)
+				for _, reason := range undetermined[i] {
+					resp.Warnings = append(resp.Warnings, entry.info.Subject+": "+reason)
+				}
 			}
 		}
 		switch {
@@ -789,7 +865,7 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 			resp.Verify.RevocationStatus, resp.Verify.RevocationMsg)
 
 		if vr.ChainStatus == "ok" {
-			if via, ok := h.trustedPath(leaf.DER, roots, intermediates); ok {
+			if via, ok := h.trustedPath(leaf.DER, roots, intermediates, transient); ok {
 				resp.Verify.Trusted = true
 				resp.Verify.TrustVia = via
 				rl.f("verify: trusted via %q", via)
@@ -803,8 +879,10 @@ func (h *handler) analyzeData(ctx context.Context, rl reqLog, data []byte, bag [
 		cj := h.certToJSON(entry.info, entry.source)
 		if certRevocations[i].status != "" {
 			cj.Revocation = &revJSON{
-				Status: certRevocations[i].status,
-				Via:    certRevocations[i].via,
+				Status:    certRevocations[i].status,
+				Via:       certRevocations[i].via,
+				RevokedAt: certRevocations[i].revokedAt,
+				Reason:    certRevocations[i].reason,
 			}
 		}
 		cj.IssuedCRLs = issuerCRLs[i]
@@ -834,6 +912,7 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 		NextUpdate:   nextFmt,
 		RevokedCount: crlInfo.RevokedCount,
 		HasIDP:       crlInfo.HasIDP,
+		IsDelta:      crlInfo.IsDelta,
 		Source:       "upload",
 		derJSON:      h.derRef(crl.DER),
 	}
@@ -846,9 +925,10 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 	} else if !crlInfo.NextUpdate.IsZero() && now.After(crlInfo.NextUpdate) {
 		resp.Warnings = append(resp.Warnings, "CRL expired at "+nextFmt)
 	}
-	if crlInfo.HasIDP {
-		resp.Warnings = append(resp.Warnings,
-			"CRL has issuingDistributionPoint — scope not analyzed")
+	if crlInfo.IsDelta {
+		resp.Warnings = append(resp.Warnings, fmt.Sprintf("CRL %q is a delta CRL: a certificate missing from it is not shown unrevoked", crlInfo.Issuer))
+	} else if crlInfo.HasIDP {
+		resp.Warnings = append(resp.Warnings, fmt.Sprintf("CRL %q has issuingDistributionPoint: it covers only the certificates in its scope", crlInfo.Issuer))
 	}
 
 	// Find the CA cert that issued this CRL and verify signature against it.
@@ -861,7 +941,7 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 			if err != nil {
 				continue
 			}
-			if crlInfo.AKI != "" && info.SKI != "" && crlInfo.AKI != info.SKI {
+			if crlInfo.AKI != "" && info.SKI != "" && crlInfo.AKI != info.SKI || !info.CanSignCRL() {
 				continue
 			}
 			caInfo = info
@@ -900,6 +980,8 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 
 		if !h.chainsToTrust(caInfo) {
 			rl.f("uploaded CRL not saved: issuer chain has no trusted anchor")
+		} else if !crlInfo.NextUpdate.IsZero() && now.After(crlInfo.NextUpdate) {
+			rl.f("uploaded CRL not saved: expired")
 		} else if err := h.store.SaveCRL(crlInfo.Issuer, "", crl.DER, crlInfo.ThisUpdate, crlInfo.NextUpdate); err != nil {
 			rl.f("store.SaveCRL(uploaded): %v", err)
 		} else {
@@ -941,8 +1023,8 @@ func (h *handler) doAnalyzeCRL(rl reqLog, start time.Time, data []byte, crl *pki
 // trustedPath verifies der with only the trusted roots among roots as
 // anchors, so trust follows the path OpenSSL verified rather than the chain
 // certview resolved; it returns the anchor's subject. The CAs on a verified
-// path join the pool of candidate issuers.
-func (h *handler) trustedPath(der []byte, roots, intermediates [][]byte) (string, bool) {
+// path, except transient ones, join the pool of candidate issuers.
+func (h *handler) trustedPath(der []byte, roots, intermediates [][]byte, transient map[string]bool) (string, bool) {
 	var anchors [][]byte
 	for _, r := range roots {
 		if t, _ := h.store.IsCertTrusted(store.SHA256Hex(r)); t {
@@ -957,7 +1039,7 @@ func (h *handler) trustedPath(der []byte, roots, intermediates [][]byte) (string
 		return "", false
 	}
 	for _, c := range vr.Chain {
-		if c.IsCA && len(c.DER) > 0 {
+		if c.IsCA && len(c.DER) > 0 && !transient[string(c.DER)] {
 			if err := h.store.SavePoolCert(c.Subject, c.Issuer, c.Serial, c.SKI, c.AKI,
 				c.SubjectNameDER, c.DER, true, c.IsSelfSigned, ""); err != nil {
 				log.Printf("store.SavePoolCert(%s): %v", c.Subject, err)
@@ -1015,7 +1097,7 @@ func (h *handler) chainsToTrust(cert *pki.CertInfo) bool {
 			}
 		}
 	}
-	_, ok := h.trustedPath(cert.DER, roots, intermediates)
+	_, ok := h.trustedPath(cert.DER, roots, intermediates, nil)
 	return ok
 }
 
@@ -1028,8 +1110,11 @@ func (h *handler) trusted(c *pki.CertInfo) bool {
 // chain, the analysis's own AIA responses or the archive's last-resort sample.
 type bagCert struct {
 	info   *pki.CertInfo
-	source string // "tls" | "fetched" | "archive"
+	source string // "tls" | "fetched" | "archive" | sourceLink
 }
+
+// sourceLink labels certificates that came in a link.
+const sourceLink = "link"
 
 func (h *handler) resolveIssuer(ctx context.Context, rl reqLog, cert *pki.CertInfo, resp *analyzeResponse, bag *[]bagCert) (*pki.CertInfo, string) {
 	// 1. Certificates this analysis already holds
@@ -1085,7 +1170,7 @@ func (h *handler) resolveIssuer(ctx context.Context, rl reqLog, cert *pki.CertIn
 		data, contentType, err := h.fetchWithInfo(ctx, fetchAIA, url)
 		if err != nil {
 			rl.f("  fetch AIA: FAILED %v", err)
-			resp.Warnings = append(resp.Warnings, "AIA fetch failed ("+url+"): "+err.Error())
+			resp.Warnings = append(resp.Warnings, "AIA fetch failed ("+url+"): "+publicError(err))
 			continue
 		}
 		rl.f("  fetch AIA: %d bytes, content-type=%s", len(data), contentType)
@@ -1233,7 +1318,7 @@ func (h *handler) derBySHA256(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	release, err := acquireBigIO(r.Context(), int64(size))
+	release, err := acquireBig(r.Context(), bigDER, int64(size))
 	if err != nil {
 		writeAnalysisError(w, err)
 		return
@@ -1248,7 +1333,8 @@ func (h *handler) derBySHA256(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(derWriteTime))
+	// A reader slower than 1 MiB/s does not hold a transfer slot for long
+	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10*time.Second + time.Duration(len(der))*time.Second/(1<<20)))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Write(der)
@@ -1269,6 +1355,10 @@ func (h *handler) analyzeByThumbprint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	// HEAD only reports that the certificate is stored
+	if r.Method == http.MethodHead {
+		return
+	}
 	h.respondAnalysis(w, r, der, func() {})
 }
 
@@ -1280,7 +1370,13 @@ func (h *handler) untrust(w http.ResponseWriter, r *http.Request) {
 	h.toggleTrust(w, r, false)
 }
 
+// toggleTrust takes only a JSON body, which a simple cross-site POST from a
+// page in the administrator's browser cannot send.
 func (h *handler) toggleTrust(w http.ResponseWriter, r *http.Request, trusted bool) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		http.Error(w, "JSON body required", http.StatusUnsupportedMediaType)
+		return
+	}
 	var req struct {
 		SHA256 string `json:"sha256"`
 		DER    []byte `json:"der_b64"`
@@ -1315,16 +1411,17 @@ func (h *handler) toggleTrust(w http.ResponseWriter, r *http.Request, trusted bo
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true, "trusted": trusted})
 }
 
-func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.CertInfo, issuer *pki.CertInfo) (*pki.OCSPResult, string, string) {
-	s1 := sha1.Sum(cert.DER)
-	thumb := strings.ToUpper(hex.EncodeToString(s1[:]))
+// resolveOCSP returns the OCSP response for cert, cached or fetched, with its
+// source and URL; without one, why the responders gave none usable.
+func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.CertInfo, issuer *pki.CertInfo) (*pki.OCSPResult, string, string, string) {
+	thumb := sha1Hex(cert.DER)
 
 	// 1. Cache lookup
 	if der, err := h.store.FindFreshOCSP(thumb); err == nil && der != nil {
 		rl.f("  ocsp[%d]: cache HIT for thumbprint=%s", i, thumb[:16])
 		res, err := h.ctx.ParseOCSPResponse(cert.DER, issuer.DER, der)
 		if err == nil {
-			return res, "cache", ""
+			return res, "cache", "", ""
 		}
 		rl.f("  ocsp[%d]: cache hit but parse failed: %v", i, err)
 	}
@@ -1333,9 +1430,10 @@ func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.C
 	reqBody, err := h.ctx.BuildOCSPRequest(cert.DER, issuer.DER)
 	if err != nil {
 		rl.f("  ocsp[%d]: build request failed: %v", i, err)
-		return nil, "", ""
+		return nil, "", "", ""
 	}
 
+	failure := ""
 	for _, url := range usableURLs(cert.OCSPURLs, maxOCSPURLs) {
 		rl.f("  ocsp[%d]: POST %s (%d bytes)", i, url, len(reqBody))
 		respBody, err := h.postOCSP(ctx, url, reqBody)
@@ -1348,6 +1446,7 @@ func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.C
 		res, err := h.ctx.ParseOCSPResponse(cert.DER, issuer.DER, respBody)
 		if err != nil {
 			rl.f("  ocsp[%d]: parse failed: %v", i, err)
+			failure = "OCSP response from " + url + " has no status for the certificate or is malformed"
 			continue
 		}
 		rl.f("  ocsp[%d]: status=%s verified=%v this=%s next=%s",
@@ -1355,15 +1454,53 @@ func (h *handler) resolveOCSP(ctx context.Context, rl reqLog, i int, cert *pki.C
 			res.ThisUpdate.Format("2006-01-02"),
 			res.NextUpdate.Format("2006-01-02"))
 
-		if res.Verified && !res.NextUpdate.IsZero() {
-			if err := h.store.SaveOCSP(thumb, url, res.Status, res.DER,
-				res.ThisUpdate, res.NextUpdate, res.ProducedAt); err != nil {
-				rl.f("  ocsp[%d]: store save: %v", i, err)
-			}
-		}
-		return res, "fetched", url
+		return res, "fetched", url, ""
 	}
-	return nil, "", ""
+	return nil, "", "", failure
+}
+
+// ocspUnverifiedNote: MiniPKI verifies both the signature and the validity
+// period of a response; its dates are shown with it.
+const ocspUnverifiedNote = "OCSP response not verified: bad signature or not current"
+
+func sha1Hex(der []byte) string {
+	s := sha1.Sum(der)
+	return strings.ToUpper(hex.EncodeToString(s[:]))
+}
+
+func ocspRevokedAt(res *pki.OCSPResult) string {
+	if res.RevokedAt.IsZero() {
+		return ""
+	}
+	return res.RevokedAt.Format(time.RFC3339)
+}
+
+// revokeReasonName names a CRLReason (RFC 5280 §5.3.1); none is negative.
+func revokeReasonName(reason int) string {
+	names := map[int]string{
+		0: "unspecified", 1: "keyCompromise", 2: "cACompromise", 3: "affiliationChanged",
+		4: "superseded", 5: "cessationOfOperation", 6: "certificateHold",
+		8: "removeFromCRL", 9: "privilegeWithdrawn", 10: "aACompromise",
+	}
+	if reason < 0 {
+		return ""
+	}
+	if name, ok := names[reason]; ok {
+		return name
+	}
+	return fmt.Sprintf("reason %d", reason)
+}
+
+// crlScopeNote says why a CRL that does not cover cert does not show it
+// unrevoked.
+func crlScopeNote(info *pki.CRLInfo, cert *pki.CertInfo) string {
+	if !bytes.Equal(info.IssuerNameDER, cert.IssuerNameDER) {
+		return fmt.Sprintf("CRL %q is not issued by the certificate's issuer", info.Issuer)
+	}
+	if info.IsDelta {
+		return fmt.Sprintf("CRL %q is a delta CRL, listing only revocations since its base CRL", info.Issuer)
+	}
+	return fmt.Sprintf("CRL %q is scoped by issuingDistributionPoint, which does not cover the certificate", info.Issuer)
 }
 
 func (h *handler) fetchWithInfo(ctx context.Context, kind fetchKind, url string) ([]byte, string, error) {
@@ -1412,8 +1549,14 @@ func (h *handler) doFetch(req *http.Request, kind fetchKind) ([]byte, string, er
 
 	contentType := resp.Header.Get("Content-Type")
 	if resp.StatusCode != http.StatusOK {
-		return nil, contentType, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, contentType, &statusError{resp.StatusCode}
 	}
-	data, err := readLimited(resp.Body, resp.ContentLength, kind.maxBytes)
+	body := bufio.NewReader(resp.Body)
+	if kind == fetchCRL {
+		if err := checkObjectStart(body, kind.maxBytes); err != nil {
+			return nil, contentType, err
+		}
+	}
+	data, err := readLimited(body, resp.ContentLength, kind.maxBytes)
 	return data, contentType, err
 }
