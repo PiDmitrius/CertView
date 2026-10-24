@@ -961,7 +961,7 @@ function render(data) {
     const node = document.createElement('div');
     node.className = 'chain-node' + (i === 0 ? ' selected' : '');
     let tags = '';
-    if (i === 0) tags += '<span class="tag leaf">LEAF</span> ';
+    if (!cert.is_ca) tags += '<span class="tag leaf">LEAF</span> ';
     if (cert.is_ca) tags += '<span class="tag ca">CA</span> ';
     if (cert.is_self_signed) tags += '<span class="tag root">ROOT</span> ';
     if (cert.is_cross_signed) tags += '<span class="tag cross" title="Cross-signed: signed by another CA with the same name">CROSS</span> ';

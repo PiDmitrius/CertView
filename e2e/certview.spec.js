@@ -115,6 +115,13 @@ test.describe('certificate links', () => {
     expect(page.url()).toBe(link);
   });
 
+  test('marks only a certificate that is not a CA as LEAF', async ({ page }) => {
+    await page.goto(baseURL + '/#cert=' + chain[1]);
+    await expectReady(page);
+    await expect(page.locator('#chain-tree > .chain-node').first()).toContainText('CA');
+    await expect(page.locator('#chain-tree .tag.leaf')).toHaveCount(0);
+  });
+
   test('builds the whole chain from a link', async ({ page }) => {
     const link = baseURL + '/#' + chain.map(c => 'cert=' + c).join('&');
     await page.goto(link);
