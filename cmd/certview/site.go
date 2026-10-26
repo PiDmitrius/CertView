@@ -187,7 +187,7 @@ func (h *handler) doAnalyzeSite(ctx context.Context, host string, port int, sni 
 			bag = append(bag, bagCert{info, "tls"})
 		}
 
-		analysis, err := h.analyzeData(ctx, rl, ders[0], bag, false)
+		analysis, err := h.analyzeData(ctx, rl, ders[0], bag)
 		if err != nil {
 			return nil, err
 		}

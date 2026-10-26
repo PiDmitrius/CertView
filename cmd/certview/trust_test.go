@@ -85,10 +85,10 @@ func TestChainsToTrustByContent(t *testing.T) {
 	lookalike, lookalikeKey := issue(t, "Root", 7, nil, nil)
 	save(lookalike, false)
 	signed, _ := issue(t, "Signed by lookalike", 8, lookalike, lookalikeKey)
-	if _, ok := h.trustedPath(signed.Raw, [][]byte{root.Raw, lookalike.Raw}, nil, nil); ok {
+	if _, ok := h.trustedPath(signed.Raw, [][]byte{root.Raw, lookalike.Raw}, nil); ok {
 		t.Fatal("path to an untrusted root named like a trusted one was trusted")
 	}
-	if via, ok := h.trustedPath(inter.Raw, [][]byte{root.Raw, lookalike.Raw}, nil, nil); !ok || via == "" {
+	if via, ok := h.trustedPath(inter.Raw, [][]byte{root.Raw, lookalike.Raw}, nil); !ok || via == "" {
 		t.Fatal("path to the trusted root not trusted")
 	}
 	if ders := h.poolIssuers(inter.RawSubject); len(ders) != 1 || !bytes.Equal(ders[0], inter.Raw) {

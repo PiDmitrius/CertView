@@ -128,6 +128,20 @@ test.describe('certificate links', () => {
     expect(page.url()).toBe(link);
   });
 
+  test('stores a link certificate and links it by thumbprint', async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: baseURL });
+    const cert = 'MIIBjzCCATWgAwIBAgIUYGMDtFuFpD_KaXm0krxS0aLSTgowCgYIKoZIzj0EAwIwHDEaMBgGA1UEAwwRY2VydHZpZXcgZTJlIGxpbmswIBcNMjYxMDI2MTU1MjEzWhgPMjEyNjEwMDIxNTUyMTNaMBwxGjAYBgNVBAMMEWNlcnR2aWV3IGUyZSBsaW5rMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEp0ATxkS1FNSJYeRGLfhqc2dXE7QBFIpXOj9tSQV4RK68lK8-6JJ5mpQhrfxuHBobo1KY3zGlWwkVeOoa2WXK6aNTMFEwHQYDVR0OBBYEFBKCyGoqNFsXpWxxYjN74YkTaQ9TMB8GA1UdIwQYMBaAFBKCyGoqNFsXpWxxYjN74YkTaQ9TMA8GA1UdEwEB_wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIhAM0xI_Xek8yc2mHEiAT7ohlAnSEAUEPpWqKVHR_I1FMTAiA2KFIw0z63YEA0eUG4dKqT4o6mcbNey8Pn3zAwR4vc5g';
+    await page.goto(baseURL + '/#cert=' + cert);
+    await expectReady(page);
+    await page.locator('#chain-tree > .chain-node > .cert-actions button', { hasText: 'Link' }).click();
+    const href = await page.evaluate(() => navigator.clipboard.readText());
+    expect(href).toMatch(/\/#[0-9A-Fa-f]{40}$/);
+
+    await page.goto(href);
+    await expectReady(page);
+    await expect(page.locator('#chain-tree')).toContainText('certview e2e link');
+  });
+
   test('marks only a certificate that is not a CA as LEAF', async ({ page }) => {
     await page.goto(baseURL + '/#cert=' + chain[1]);
     await expectReady(page);

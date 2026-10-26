@@ -15,7 +15,7 @@ import (
 )
 
 // analyzeLink analyzes the certificates of a #cert= link: base64url DER, leaf
-// first, the others offered as its issuers before AIA. None is stored.
+// first, the others offered as its issuers before AIA. It is stored as an upload.
 func (h *handler) analyzeLink(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Certs []string `json:"certs"`
@@ -56,7 +56,7 @@ func (h *handler) doAnalyzeLink(ctx context.Context, certs []*pki.CertInfo) (*an
 	for _, c := range certs[1:] {
 		bag = append(bag, bagCert{c, sourceLink})
 	}
-	return h.analyzeData(ctx, rl, certs[0].DER, bag, true)
+	return h.analyzeData(ctx, rl, certs[0].DER, bag)
 }
 
 // parseLink decodes the certificates of a link, at most maxChainDepth.

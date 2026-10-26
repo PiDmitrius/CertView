@@ -63,8 +63,8 @@ func TestLinkChainWithoutNetwork(t *testing.T) {
 		t.Fatalf("chain of %d, %s, trusted %v: %s", len(resp.Chain), resp.Verify.Status, resp.Verify.Trusted, resp.Verify.Message)
 	}
 	for _, c := range []*testCA{leaf, inter} {
-		if h.store.HasDER(store.SHA256Hex(c.cert.Raw)) {
-			t.Fatalf("%s from the link was stored", c.cert.Subject.CommonName)
+		if !h.store.HasDER(store.SHA256Hex(c.cert.Raw)) {
+			t.Fatalf("%s from the link was not stored", c.cert.Subject.CommonName)
 		}
 	}
 
