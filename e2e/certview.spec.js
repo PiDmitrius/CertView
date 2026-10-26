@@ -116,16 +116,31 @@ test.describe('certificate links', () => {
     expect(chain.length).toBeGreaterThan(1);
   });
 
-  test('opens the certificate of a link and keeps the link on reload', async ({ page }) => {
-    const link = baseURL + '/#cert=' + chain[0];
-    await page.goto(link);
+  test('opens the certificate of a link and replaces the link by its thumbprint', async ({ page }) => {
+    await page.goto(baseURL + '/#cert=' + chain[0]);
     await expectReady(page);
     await expect(page.locator('#chain-tree > .chain-node').first()).toContainText('LEAF');
-    expect(page.url()).toBe(link);
+    const tp = await page.evaluate(() => window.__lastData.chain[0].thumbprint_sha1);
+    expect(page.url()).toBe(baseURL + '/#' + tp);
 
     await page.reload();
     await expectReady(page);
-    expect(page.url()).toBe(link);
+    expect(page.url()).toBe(baseURL + '/#' + tp);
+    await expect(page.locator('#chain-tree > .chain-node').first()).toContainText('LEAF');
+  });
+
+  test('stores a link certificate and links it by thumbprint', async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: baseURL });
+    const cert = 'MIIBjzCCATWgAwIBAgIUYGMDtFuFpD_KaXm0krxS0aLSTgowCgYIKoZIzj0EAwIwHDEaMBgGA1UEAwwRY2VydHZpZXcgZTJlIGxpbmswIBcNMjYxMDI2MTU1MjEzWhgPMjEyNjEwMDIxNTUyMTNaMBwxGjAYBgNVBAMMEWNlcnR2aWV3IGUyZSBsaW5rMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEp0ATxkS1FNSJYeRGLfhqc2dXE7QBFIpXOj9tSQV4RK68lK8-6JJ5mpQhrfxuHBobo1KY3zGlWwkVeOoa2WXK6aNTMFEwHQYDVR0OBBYEFBKCyGoqNFsXpWxxYjN74YkTaQ9TMB8GA1UdIwQYMBaAFBKCyGoqNFsXpWxxYjN74YkTaQ9TMA8GA1UdEwEB_wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIhAM0xI_Xek8yc2mHEiAT7ohlAnSEAUEPpWqKVHR_I1FMTAiA2KFIw0z63YEA0eUG4dKqT4o6mcbNey8Pn3zAwR4vc5g';
+    await page.goto(baseURL + '/#cert=' + cert);
+    await expectReady(page);
+    await page.locator('#chain-tree > .chain-node > .cert-actions button', { hasText: 'Link' }).click();
+    const href = await page.evaluate(() => navigator.clipboard.readText());
+    expect(href).toMatch(/\/#[0-9A-Fa-f]{40}$/);
+
+    await page.goto(href);
+    await expectReady(page);
+    await expect(page.locator('#chain-tree')).toContainText('certview e2e link');
   });
 
   test('marks only a certificate that is not a CA as LEAF', async ({ page }) => {
@@ -140,7 +155,6 @@ test.describe('certificate links', () => {
     await page.goto(link);
     await expectReady(page);
     await expect(page.locator('#chain-tree > .chain-node')).toHaveCount(chain.length);
-    expect(page.url()).toBe(link);
   });
 
   test('reports a bad link', async ({ page }) => {

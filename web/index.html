@@ -678,6 +678,7 @@ function loadLink(certs) {
     if (r.resp.status === 400) return showError('Bad link', r.body.replace(/^Bad link: /, ''));
     if (!r.resp.ok) return showError('Load failed', r.body);
     render(r.body);
+    updateHashFromData(r.body);
   });
 }
 
@@ -848,7 +849,7 @@ function pathLooksLikeHost(p) {
 function updateHashFromData(data) {
   if (data && data.chain && data.chain.length > 0) {
     const tp = data.chain[0].thumbprint_sha1;
-    if (tp) {
+    if (tp && data.chain[0].stored) {
       // Suppress hashchange handler
       window.__suppressHash = true;
       window.location.hash = tp;

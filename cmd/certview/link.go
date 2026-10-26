@@ -15,7 +15,7 @@ import (
 )
 
 // analyzeLink analyzes the certificates of a #cert= link: base64url DER, leaf
-// first, the others offered as its issuers before AIA. None is stored.
+// first, the others offered as its issuers before AIA. It is stored as an upload.
 func (h *handler) analyzeLink(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Certs []string `json:"certs"`
@@ -56,7 +56,7 @@ func (h *handler) doAnalyzeLink(ctx context.Context, certs []*pki.CertInfo) (*an
 	for _, c := range certs[1:] {
 		bag = append(bag, bagCert{c, sourceLink})
 	}
-	return h.analyzeData(ctx, rl, certs[0].DER, bag, true)
+	return h.analyzeData(ctx, rl, certs[0].DER, bag)
 }
 
 // parseLink decodes the certificates of a link, at most maxChainDepth.
@@ -69,8 +69,8 @@ func (h *handler) parseLink(values []string) ([]*pki.CertInfo, error) {
 	}
 	var certs []*pki.CertInfo
 	for i, v := range values {
-		der, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(v, "="))
-		if err != nil || len(der) == 0 || der[0] != 0x30 {
+		der, ok := decodeB64URL(v)
+		if !ok {
 			return nil, fmt.Errorf("certificate %d is not base64url DER", i+1)
 		}
 		if len(der) > limits.CertSize {
@@ -83,4 +83,10 @@ func (h *handler) parseLink(values []string) ([]*pki.CertInfo, error) {
 		certs = append(certs, info)
 	}
 	return certs, nil
+}
+
+// decodeB64URL decodes base64url DER, padded or not.
+func decodeB64URL(s string) ([]byte, bool) {
+	der, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
+	return der, err == nil && len(der) > 0 && der[0] == 0x30
 }
