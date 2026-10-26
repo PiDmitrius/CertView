@@ -116,16 +116,17 @@ test.describe('certificate links', () => {
     expect(chain.length).toBeGreaterThan(1);
   });
 
-  test('opens the certificate of a link and keeps the link on reload', async ({ page }) => {
-    const link = baseURL + '/#cert=' + chain[0];
-    await page.goto(link);
+  test('opens the certificate of a link and replaces the link by its thumbprint', async ({ page }) => {
+    await page.goto(baseURL + '/#cert=' + chain[0]);
     await expectReady(page);
     await expect(page.locator('#chain-tree > .chain-node').first()).toContainText('LEAF');
-    expect(page.url()).toBe(link);
+    const tp = await page.evaluate(() => window.__lastData.chain[0].thumbprint_sha1);
+    expect(page.url()).toBe(baseURL + '/#' + tp);
 
     await page.reload();
     await expectReady(page);
-    expect(page.url()).toBe(link);
+    expect(page.url()).toBe(baseURL + '/#' + tp);
+    await expect(page.locator('#chain-tree > .chain-node').first()).toContainText('LEAF');
   });
 
   test('stores a link certificate and links it by thumbprint', async ({ page, context }) => {
@@ -154,7 +155,6 @@ test.describe('certificate links', () => {
     await page.goto(link);
     await expectReady(page);
     await expect(page.locator('#chain-tree > .chain-node')).toHaveCount(chain.length);
-    expect(page.url()).toBe(link);
   });
 
   test('reports a bad link', async ({ page }) => {
