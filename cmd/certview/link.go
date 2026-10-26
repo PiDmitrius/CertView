@@ -69,8 +69,8 @@ func (h *handler) parseLink(values []string) ([]*pki.CertInfo, error) {
 	}
 	var certs []*pki.CertInfo
 	for i, v := range values {
-		der, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(v, "="))
-		if err != nil || len(der) == 0 || der[0] != 0x30 {
+		der, ok := decodeB64URL(v)
+		if !ok {
 			return nil, fmt.Errorf("certificate %d is not base64url DER", i+1)
 		}
 		if len(der) > limits.CertSize {
@@ -83,4 +83,10 @@ func (h *handler) parseLink(values []string) ([]*pki.CertInfo, error) {
 		certs = append(certs, info)
 	}
 	return certs, nil
+}
+
+// decodeB64URL decodes base64url DER, padded or not.
+func decodeB64URL(s string) ([]byte, bool) {
+	der, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
+	return der, err == nil && len(der) > 0 && der[0] == 0x30
 }

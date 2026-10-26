@@ -288,6 +288,11 @@ func (h *handler) analyze(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "empty body", http.StatusBadRequest)
 		return
 	}
+	if text := bytes.TrimSpace(data); bytes.ContainsAny(text, "-_") {
+		if der, ok := decodeB64URL(string(text)); ok {
+			data = der
+		}
+	}
 	h.respondAnalysis(w, r, data, releaseIO)
 }
 

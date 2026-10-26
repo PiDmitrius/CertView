@@ -98,3 +98,23 @@ func TestBadLink(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyzeBase64URL(t *testing.T) {
+	h := newTestHandler(t, nil)
+	h.client = &http.Client{Transport: noNet{t}}
+	h.analysisCache = newRespCache[analyzeResponse](0)
+	var text string
+	for !strings.ContainsAny(text, "-_") {
+		text = b64url(testIssue(t, "Base64url Root", nil, true, nil).cert.Raw)
+	}
+
+	rec := httptest.NewRecorder()
+	h.analyze(rec, httptest.NewRequest(http.MethodPost, "/api/analyze", strings.NewReader(text+"\n")))
+	var resp analyzeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("HTTP %d: %s", rec.Code, rec.Body)
+	}
+	if len(resp.Chain) != 1 || resp.Chain[0].Subject != "CN = Base64url Root" {
+		t.Fatalf("chain of %d: %s", len(resp.Chain), resp.Verify.Message)
+	}
+}
